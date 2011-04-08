@@ -1,0 +1,4 @@
+Animatronix (current working title) is a simple mathematical animation plugin for
+jQuery, with several oscillators and attractor-based animations to choose from.
+The code isn't very pretty at the moment, and there are some performance
+enhancements to be made, but it works.
