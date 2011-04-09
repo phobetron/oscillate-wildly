@@ -1,4 +1,6 @@
 (function($) {
+  var intervals = [];
+
   $.fn.Animatronix = function(type, options) {
     var settings = {
       fps: 24,
@@ -169,8 +171,8 @@
         calc.c.restore();
       }
 
-      if (null != window["animint"+i]) { clearInterval(window["animint"+i]); }
-      window["animint"+i] = setInterval(draw, 600/settings.fps);
+      if (null != intervals[i]) { clearInterval(intervals[i]); }
+      intervals[i] = setInterval(draw, 600/settings.fps);
     });
   }
 })(jQuery);
