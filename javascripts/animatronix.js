@@ -148,6 +148,22 @@
             this.c.scale(z/20,z/20);
           }
         }
+      },
+
+      helix: function() {
+        var x = 1;
+        var y = 1;
+        var z = 0;
+
+        return {
+          calculate: function() {
+            z++;
+            x = Math.cos(z/10);
+            y = Math.sin((z+50)/20);
+            this.c.translate(Math.ceil(x*(this.halfWidth/2))+this.halfWidth, Math.ceil(z));
+            this.c.scale(y*2,y*2);
+          }
+        }
       }
     }
 
@@ -161,6 +177,7 @@
       calc.height = calc.c.canvas.height;
       calc.halfHeight = calc.height/2;
       calc.halfWidth = calc.width/2;
+      calc.half = calc.halfWidth < calc.halfHeight ? calc.halfWidth : calc.halfHeight;
 
       var draw = function() {
         calc.c.clearRect(0, 0, calc.width, calc.height);
