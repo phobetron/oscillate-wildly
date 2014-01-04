@@ -20,7 +20,7 @@ To use, include jQuery and the OW javascript code, and instantiate similarly:
 $("#oscillate-wildly").OscillateWildly('lorenz');
 ```
 
-The plugin also accepts an optional settings object that accepts `fps` and `shape` members. The `shape` member is a function that is passed two arguments.
+The plugin also accepts an optional settings object with `fps` and `shape` properties. The `shape` property is a function that is passed two arguments.
 
 - A `calculator` object for the given animation type
 - The `canvas` 2d context
