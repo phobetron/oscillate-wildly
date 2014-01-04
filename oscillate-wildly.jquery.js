@@ -24,6 +24,8 @@
       }
     }
 
+    if (options) { settings = $.extend(settings, options); }
+
     var calculators = {
       rose: function() {
         var t = 0;
@@ -195,8 +197,6 @@
     }
 
     return this.each(function(i) {
-      if (options) { settings = $.extend(settings, options); }
-
       var calc = new calculators[type]();
 
       var c = this.getContext('2d');

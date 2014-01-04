@@ -2,6 +2,14 @@
 
 Oscillate Wildly is a collection of HTML5 canvas oscillators and fractal/chaos animations packaged as a jQuery plugin. The algorithms are broken apart fairly well, so the code could easily be ported and modified to other projects and languages.
 
+## Usage
+
+To use, include jQuery and the OW javascript code, and instantiate similarly:
+
+```js
+$("#oscillate-wildly").OscillateWildly('lorenz');
+```
+
 The following animation types are currently available:
 
 - Ellipse Orbit (2D & 3D) `ellipse`
@@ -11,14 +19,6 @@ The following animation types are currently available:
 - Duffing Oscillator `duffing`
 - Lorenz Attractor `lorenz`
 - Helix Spiral `helix`
-
-## Usage
-
-To use, include jQuery and the OW javascript code, and instantiate similarly:
-
-```js
-$("#oscillate-wildly").OscillateWildly('lorenz');
-```
 
 The plugin also accepts an optional settings object with `fps` and `shape` properties. The `shape` property is a function that is passed two arguments.
 
