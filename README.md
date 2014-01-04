@@ -1,6 +1,6 @@
 # Oscillate Wildly
 
-Oscillate Wildly is a collection of HTML5 canvas oscillators and fractal/chaos animations packaged as a jQuery plugin. The algorithms are broken apart fairly well, so the code could easily be ported and modified to other projects and languages.
+Oscillate Wildly is a collection of HTML5 canvas oscillators and fractal/chaos animations packaged as a jQuery plugin (because I'm lazy). The algorithms are broken apart fairly well, so the code could easily be ported and modified to other projects and languages.
 
 ## Usage
 
