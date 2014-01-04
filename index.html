@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+
+    <title>Oscillate Wildly - Default Examples</title>
+
+    <style>
+      #switch {
+        list-style-type: none;
+        float: left;
+        margin-right: 1em;
+      }
+      #switch li {
+        display: block;
+      }
+      #oscillate-wildly {
+        border: 1px solid black;
+      }
+    </style>
+
+    <script src="//ajax.googleapis.com/ajax/libs/jquery/2.0.3/jquery.min.js"></script>
+    <script src="oscillate-wildly.jquery.js"></script>
+
+    <script type="text/javascript">
+      $(window).ready(function() {
+        $("#switch a").each(function(i, a) {
+          a = $(a);
+          a.click(function(e) {
+            e.preventDefault();
+            var type = a.attr("href").replace(/#/, '');
+            $("#oscillate-wildly").OscillateWildly(type, { fps: 36 });
+          });
+        });
+      });
+    </script>
+  </head>
+
+  <body>
+    <h1>Oscillate Wildly</h1>
+    <p><strong>Default Examples</strong></p>
+
+    <ul id="switch">
+      <li><a href="#ellipse">Ellipse</a></li>
+      <li><a href="#rose">Rose</a></li>
+      <li><a href="#lissajous">Lissajous</a></li>
+      <li><a href="#vanderpol">Van der Pol</a></li>
+      <li><a href="#duffing">Duffing</a></li>
+      <li><a href="#lorenz">Lorenz</a></li>
+      <li><a href="#helix">Helix</a></li>
+    </ul>
+
+    <canvas id="oscillate-wildly" width="600" height="300"></canvas>
+  </body>
+</html>

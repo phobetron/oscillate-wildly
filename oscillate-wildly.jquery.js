@@ -1,27 +1,25 @@
 (function($) {
   var intervals = [];
 
-  $.fn.Animatronix = function(type, options) {
+  $.fn.OscillateWildly = function(type, options) {
     var settings = {
       fps: 24,
-      shape: function(c){
-        c.fillStyle = "rgba(255,0,0,1)";
+      shape: function(calc, c){
+        var state = calc.calculate();
+
+        if (state.time == 1) {
+          c.clearRect(0, 0, calc.width, calc.height);
+        }
+
+        var radius = 5;
+        if (state.posZ) {
+          radius = radius * Math.abs(state.posZ);
+        }
+
         c.beginPath();
-        c.arc(0,0,5,0,Math.PI*2,false);
+        c.arc(state.posX, state.posY,radius,0,Math.PI*2,false);
+        c.fillStyle = "rgb(255,0,0)";
         c.fill();
-        c.closePath();
-      },
-      background: function(c) {
-        var width = c.canvas.width;
-        var height = c.canvas.height;
-        var halfWidth = width/2;
-        var halfHeight = height/2;
-        g = c.createRadialGradient(halfWidth, halfHeight, 0, halfWidth, halfHeight, halfWidth);
-        g.addColorStop(0.0, "rgba(255,255,255,1)");
-        g.addColorStop(1.0, "rgba(0,0,0,1)");
-        c.fillStyle = g;
-        c.beginPath();
-        c.fillRect(0, 0, width, height);
         c.closePath();
       }
     }
@@ -35,9 +33,13 @@
         return {
           calculate: function() {
             t++;
-            x = Math.sin(2*t/180)*Math.cos(5*t/180)*(this.halfWidth/1.2);
-            y = Math.sin(2*t/180)*Math.sin(5*t/180)*(this.halfHeight/1.2);
-            this.c.translate(Math.ceil(x)+this.halfWidth, Math.ceil(y)+this.halfHeight);
+            x = Math.sin(2*t/180)*Math.cos(5*t/180)*(this.halfWidth/1.1);
+            y = Math.sin(2*t/180)*Math.sin(5*t/180)*(this.halfHeight/1.1);
+            return {
+              time: t, x: x, y: y,
+              posX: Math.ceil(x)+this.halfWidth,
+              posY: Math.ceil(y)+this.halfHeight
+            }
           }
         }
       },
@@ -50,14 +52,18 @@
         return {
           calculate: function() {
             t++;
-            x = -Math.cos(t/288 * (Math.PI*2))*(this.halfWidth/1.2);
-            y = Math.sin(t/360 * (Math.PI*2))*(this.halfHeight/1.2);
-            this.c.translate(Math.ceil(x)+this.halfWidth, Math.ceil(y)+this.halfHeight);
+            x = -Math.cos(t/288 * (Math.PI*2))*(this.halfWidth/1.1);
+            y = Math.sin(t/360 * (Math.PI*2))*(this.halfHeight/1.1);
+            return {
+              time: t, x: x, y: y,
+              posX: Math.ceil(x)+this.halfWidth,
+              posY: Math.ceil(y)+this.halfHeight
+            }
           }
         }
       },
 
-      ellipse: function(ellipsoid) {
+      ellipse: function() {
         var t = 0;
         var x = 1;
         var y = 1;
@@ -66,18 +72,18 @@
         return {
           calculate: function() {
             t++;
-            x = -Math.sin(t/360 * (Math.PI*2))*(this.halfWidth/1.2);
-            y = Math.cos(t/360 * (Math.PI*2))*(this.halfHeight/2.5);
-            this.c.translate(Math.ceil(x)+this.halfWidth, Math.ceil(y)+this.halfHeight);
-            if (ellipsoid) {
-              z = Math.round(Math.abs(Math.cos(t/360 * Math.PI))*100)/100;
-              this.c.scale(z+0.5, z+0.5);
+            x = -Math.sin(t/360 * (Math.PI*2))*(this.halfWidth/1.1);
+            y = Math.cos(t/360 * (Math.PI*2))*(this.halfHeight/1.1);
+            z = Math.round(Math.abs(Math.cos(t/360 * Math.PI))*100)/100;
+            return {
+              time: t, x: x, y: y, z: z,
+              posX: Math.ceil(x)+this.halfWidth,
+              posY: Math.ceil(y)+this.halfHeight,
+              posZ: z+0.5
             }
           }
         }
       },
-
-      ellipsoid: function() { return calculators.ellipse(true); },
 
       vanderpol: function() {
         var t = 0;
@@ -94,7 +100,11 @@
             _y = y+h * (-x - mu * (Math.pow(x,2) - 1) * y);
             x = _x;
             y = _y;
-            this.c.translate(Math.ceil(x*40)+this.halfWidth, Math.ceil(y*40)+this.halfHeight);
+            return {
+              time: t, x: x, y: y,
+              posX: Math.ceil(x*(this.width/6))+this.halfWidth,
+              posY: Math.ceil(y*(this.height/6))+this.halfHeight
+            }
           }
         }
       },
@@ -119,7 +129,11 @@
             _y = y+h * (x-Math.pow(x,3)-a*y+b*Math.cos(w*t));
             x = _x;
             y = _y;
-            this.c.translate(Math.ceil(x*60)+this.halfWidth, Math.ceil(y*50)+this.halfHeight);
+            return {
+              time: t*10, x: x, y: y,
+              posX: Math.ceil(x*(this.width/6))+this.halfWidth,
+              posY: Math.ceil(y*(this.height/6))+this.halfHeight
+            }
           }
         }
       },
@@ -144,24 +158,37 @@
             x = _x;
             y = _y;
             z = _z;
-            this.c.translate(Math.ceil(x*5)+this.halfWidth, Math.ceil(y*5)+this.halfHeight);
-            this.c.scale(z/20,z/20);
+            return {
+              time: t, x: x, y: y, z: z,
+              posX: Math.ceil(y*(this.width/55))+this.halfWidth,
+              posY: Math.ceil(z*(this.height/55)),
+              posZ: x/10
+            }
           }
         }
       },
 
       helix: function() {
+        var t = 0;
         var x = 1;
         var y = 1;
         var z = 0;
 
         return {
           calculate: function() {
+            t++;
             z++;
-            x = Math.cos(z/10);
-            y = Math.sin((z+50)/20);
-            this.c.translate(Math.ceil(x*(this.halfWidth/2))+this.halfWidth, Math.ceil(z));
-            this.c.scale(y*2,y*2);
+            x = Math.cos(t/10);
+            y = Math.sin((t+50)/20);
+            if (z > this.height) {
+              z = 0;
+            }
+            return {
+              time: t, x: x, y: y, z: z,
+              posX: Math.ceil(x*this.halfWidth*.9)+this.halfWidth,
+              posY: Math.ceil(z),
+              posZ: y*2
+            }
           }
         }
       }
@@ -172,20 +199,17 @@
 
       var calc = new calculators[type]();
 
-      calc.c = this.getContext('2d');
-      calc.width = calc.c.canvas.width;
-      calc.height = calc.c.canvas.height;
+      var c = this.getContext('2d');
+      calc.width = c.canvas.width;
+      calc.height = c.canvas.height;
       calc.halfHeight = calc.height/2;
       calc.halfWidth = calc.width/2;
       calc.half = calc.halfWidth < calc.halfHeight ? calc.halfWidth : calc.halfHeight;
 
       var draw = function() {
-        calc.c.clearRect(0, 0, calc.width, calc.height);
-        calc.c.save();
-        settings.background(calc.c);
-        calc.calculate();
-        settings.shape(calc.c);
-        calc.c.restore();
+        c.save();
+        settings.shape(calc, c);
+        c.restore();
       }
 
       if (null != intervals[i]) { clearInterval(intervals[i]); }
