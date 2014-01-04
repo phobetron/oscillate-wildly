@@ -10,6 +10,7 @@
         list-style-type: none;
         float: left;
         margin-right: 1em;
+        padding-left: 0;
       }
       #switch li {
         display: block;
@@ -19,7 +20,7 @@
       }
     </style>
 
-    <script src="//ajax.googleapis.com/ajax/libs/jquery/2.0.3/jquery.min.js"></script>
+    <script src="http://ajax.googleapis.com/ajax/libs/jquery/2.0.3/jquery.min.js"></script>
     <script src="oscillate-wildly.jquery.js"></script>
 
     <script type="text/javascript">
@@ -29,7 +30,7 @@
           a.click(function(e) {
             e.preventDefault();
             var type = a.attr("href").replace(/#/, '');
-            $("#oscillate-wildly").OscillateWildly(type, { fps: 36 });
+            $("#oscillate-wildly").OscillateWildly(type);
           });
         });
       });
