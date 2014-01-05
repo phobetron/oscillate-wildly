@@ -206,14 +206,27 @@
       calc.halfWidth = calc.width/2;
       calc.half = calc.halfWidth < calc.halfHeight ? calc.halfWidth : calc.halfHeight;
 
+      var now, delta;
+      var then = Date.now();
+      var interval = 1000/settings.fps;
+
       var draw = function() {
-        c.save();
-        settings.shape(calc, c);
-        c.restore();
+        requestAnimationFrame(draw);
+
+        now = Date.now();
+        delta = now - then;
+
+        if (delta >= interval) {
+          c.save();
+          settings.shape(calc, c);
+          c.restore();
+
+          then = now - (delta % interval);
+        }
+
       }
 
-      if (null != intervals[i]) { clearInterval(intervals[i]); }
-      intervals[i] = setInterval(draw, 600/settings.fps);
+      draw();
     });
   }
 })(jQuery);
