@@ -1,6 +1,4 @@
 (function($) {
-  var intervals = [];
-
   $.fn.OscillateWildly = function(type, options) {
     var settings = {
       fps: 24,
@@ -223,7 +221,6 @@
 
           then = now - (delta % interval);
         }
-
       }
 
       draw();
