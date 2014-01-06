@@ -215,9 +215,7 @@
         delta = now - then;
 
         if (delta >= interval) {
-          c.save();
           settings.shape(calc, c);
-          c.restore();
 
           then = now - (delta % interval);
         }
