@@ -5,9 +5,7 @@
       shape: function(calc, c){
         var state = calc.calculate();
 
-        if (state.time == 1) {
-          c.clearRect(0, 0, calc.width, calc.height);
-        }
+        c.clearRect(0, 0, calc.width, calc.height);
 
         var radius = 5;
         if (state.posZ) {
