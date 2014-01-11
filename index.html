@@ -15,7 +15,7 @@
       #switch li {
         display: block;
       }
-      #oscillate-wildly {
+      .oscillate-wildly {
         border: 1px solid black;
       }
     </style>
@@ -30,7 +30,11 @@
           a.click(function(e) {
             e.preventDefault();
             var type = a.attr("href").replace(/#/, '');
-            $("#oscillate-wildly").OscillateWildly(type);
+            var $sel = $(".oscillate-wildly");
+            $sel.each(function(i, sel) {
+              cancelAnimationFrame($(sel).attr("data-raf"));
+            });
+            $sel.OscillateWildly(type);
           });
         });
       });
@@ -51,6 +55,6 @@
       <li><a href="#helix">Helix</a></li>
     </ul>
 
-    <canvas id="oscillate-wildly" width="600" height="300"></canvas>
+    <canvas class="oscillate-wildly" width="600" height="300"></canvas>
   </body>
 </html>

@@ -35,8 +35,8 @@
             y = Math.sin(2*t/180)*Math.sin(5*t/180)*(this.halfHeight/1.1);
             return {
               time: t, x: x, y: y,
-              posX: Math.ceil(x)+this.halfWidth,
-              posY: Math.ceil(y)+this.halfHeight
+              posX: x+this.halfWidth,
+              posY: y+this.halfHeight
             }
           }
         }
@@ -54,8 +54,8 @@
             y = Math.sin(t/360 * (Math.PI*2))*(this.halfHeight/1.1);
             return {
               time: t, x: x, y: y,
-              posX: Math.ceil(x)+this.halfWidth,
-              posY: Math.ceil(y)+this.halfHeight
+              posX: x+this.halfWidth,
+              posY: y+this.halfHeight
             }
           }
         }
@@ -75,8 +75,8 @@
             z = Math.round(Math.abs(Math.cos(t/360 * Math.PI))*100)/100;
             return {
               time: t, x: x, y: y, z: z,
-              posX: Math.ceil(x)+this.halfWidth,
-              posY: Math.ceil(y)+this.halfHeight,
+              posX: x+this.halfWidth,
+              posY: y+this.halfHeight,
               posZ: z+0.5
             }
           }
@@ -100,8 +100,8 @@
             y = _y;
             return {
               time: t, x: x, y: y,
-              posX: Math.ceil(x*(this.width/6))+this.halfWidth,
-              posY: Math.ceil(y*(this.height/6))+this.halfHeight
+              posX: (x*(this.width/6))+this.halfWidth,
+              posY: (y*(this.height/6))+this.halfHeight
             }
           }
         }
@@ -129,18 +129,18 @@
             y = _y;
             return {
               time: t*10, x: x, y: y,
-              posX: Math.ceil(x*(this.width/6))+this.halfWidth,
-              posY: Math.ceil(y*(this.height/6))+this.halfHeight
+              posX: (x*(this.width/6))+this.halfWidth,
+              posY: (y*(this.height/6))+this.halfHeight
             }
           }
         }
       },
 
       lorenz: function() {
-        var t = 0;
-        var x = 1;
-        var y = 1;
-        var z = 1;
+        var t = 40;
+        var x = 18.89688574723792;
+        var y = 2.799477162418296;
+        var z = 53.555488125917094;
 
         return  {
           calculate: function() {
@@ -158,8 +158,8 @@
             z = _z;
             return {
               time: t, x: x, y: y, z: z,
-              posX: Math.ceil(y*(this.width/55))+this.halfWidth,
-              posY: Math.ceil(z*(this.height/55)),
+              posX: (y*(this.width/55))+this.halfWidth,
+              posY: z*(this.height/55),
               posZ: x/10
             }
           }
@@ -183,8 +183,8 @@
             }
             return {
               time: t, x: x, y: y, z: z,
-              posX: Math.ceil(x*this.halfWidth*.9)+this.halfWidth,
-              posY: Math.ceil(z),
+              posX: (x*this.halfWidth*.9)+this.halfWidth,
+              posY: z,
               posZ: y*2
             }
           }
@@ -205,9 +205,10 @@
       var now, delta;
       var then = Date.now();
       var interval = 1000/settings.fps;
+      var $this = $(this);
 
       var draw = function() {
-        requestAnimationFrame(draw);
+        $this.attr("data-raf", requestAnimationFrame(draw));
 
         now = Date.now();
         delta = now - then;
