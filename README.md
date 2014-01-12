@@ -20,12 +20,16 @@ The following animation types are currently available:
 - Lorenz Attractor `lorenz`
 - Helix Spiral `helix`
 
-The plugin also accepts an optional settings object with `fps` and `shape` properties. The `shape` property is a function that is passed two arguments.
+The plugin also accepts an optional settings object with `fps`,  `shape`, and `pause` properties.
+
+The `shape` property is a function that is passed two arguments.
 
 - A `calculator` object for the given animation type
 - The `canvas` 2d context
 
 The `calculator` has a `calculate` function that returns an object representing the state of the equation for each frame in which it is called. This setup allows you to do basically anything you want with the variables returned buring computation.
+
+The `pause` property is an element the plugin will listen to in order to pause animation. If the element has the class name `paused`, the animation will pause until that class name is removed. If the `pause` element is not provided, the default behavior will be to pause on canvas click.
 
 ## Contributing
 

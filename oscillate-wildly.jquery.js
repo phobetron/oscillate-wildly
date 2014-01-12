@@ -17,7 +17,8 @@
         c.fillStyle = "rgb(255,0,0)";
         c.fill();
         c.closePath();
-      }
+      },
+      pause: "default"
     }
 
     if (options) { settings = $.extend(settings, options); }
@@ -207,6 +208,8 @@
       var interval = 1000/settings.fps;
       var $this = $(this);
 
+      var $pauseButton = settings.pause == "default" ? $this : $(settings.pause);
+
       var draw = function() {
         $this.attr("data-raf", requestAnimationFrame(draw));
 
@@ -214,13 +217,23 @@
         delta = now - then;
 
         if (delta >= interval) {
-          settings.shape(calc, c);
-
           then = now - (delta % interval);
+
+          if (!$pauseButton.hasClass("paused")) { settings.shape(calc, c); }
         }
       }
 
       draw();
+
+      if (settings.pause == "default") {
+        $pauseButton.click(function() {
+          if ($pauseButton.hasClass("paused")) {
+            $pauseButton.removeClass("paused");
+          } else {
+            $pauseButton.addClass("paused");
+          }
+        });
+      }
     });
   }
 })(jQuery);
