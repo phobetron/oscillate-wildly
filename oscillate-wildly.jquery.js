@@ -1,7 +1,7 @@
 (function($) {
   $.fn.OscillateWildly = function(type, options) {
     var settings = {
-      fps: 24,
+      fps: 36,
       shape: function(calc, c){
         var state = calc.calculate();
 
