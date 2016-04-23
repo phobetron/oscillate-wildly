@@ -1,11 +1,9 @@
 (function($) {
   $.fn.OscillateWildly = function(type, options) {
     var settings = {
-      fps: 36,
-      shape: function(calc, c){
-        var state = calc.calculate();
-
-        c.clearRect(0, 0, calc.width, calc.height);
+      fps: 24,
+      shape: function(state, c){
+        c.clearRect(0, 0, this.width, this.height);
 
         var radius = 5;
         if (state.posZ) {
@@ -17,8 +15,7 @@
         c.fillStyle = "rgb(255,0,0)";
         c.fill();
         c.closePath();
-      },
-      pause: "default"
+      }
     }
 
     if (options) { settings = $.extend(settings, options); }
@@ -32,12 +29,12 @@
         return {
           calculate: function() {
             t++;
-            x = Math.sin(2*t/180)*Math.cos(5*t/180)*(this.halfWidth/1.1);
-            y = Math.sin(2*t/180)*Math.sin(5*t/180)*(this.halfHeight/1.1);
+            x = Math.sin(2*t/180)*Math.cos(5*t/180)*(settings.halfWidth/1.1);
+            y = Math.sin(2*t/180)*Math.sin(5*t/180)*(settings.halfHeight/1.1);
             return {
               time: t, x: x, y: y,
-              posX: x+this.halfWidth,
-              posY: y+this.halfHeight
+              posX: x+settings.halfWidth,
+              posY: y+settings.halfHeight
             }
           }
         }
@@ -51,12 +48,12 @@
         return {
           calculate: function() {
             t++;
-            x = -Math.cos(t/288 * (Math.PI*2))*(this.halfWidth/1.1);
-            y = Math.sin(t/360 * (Math.PI*2))*(this.halfHeight/1.1);
+            x = -Math.cos(t/288 * (Math.PI*2))*(settings.halfWidth/1.1);
+            y = Math.sin(t/360 * (Math.PI*2))*(settings.halfHeight/1.1);
             return {
               time: t, x: x, y: y,
-              posX: x+this.halfWidth,
-              posY: y+this.halfHeight
+              posX: x+settings.halfWidth,
+              posY: y+settings.halfHeight
             }
           }
         }
@@ -71,13 +68,13 @@
         return {
           calculate: function() {
             t++;
-            x = -Math.sin(t/360 * (Math.PI*2))*(this.halfWidth/1.1);
-            y = Math.cos(t/360 * (Math.PI*2))*(this.halfHeight/1.1);
+            x = -Math.sin(t/360 * (Math.PI*2))*(settings.halfWidth/1.1);
+            y = Math.cos(t/360 * (Math.PI*2))*(settings.halfHeight/1.1);
             z = Math.round(Math.abs(Math.cos(t/360 * Math.PI))*100)/100;
             return {
               time: t, x: x, y: y, z: z,
-              posX: x+this.halfWidth,
-              posY: y+this.halfHeight,
+              posX: x+settings.halfWidth,
+              posY: y+settings.halfHeight,
               posZ: z+0.5
             }
           }
@@ -101,8 +98,8 @@
             y = _y;
             return {
               time: t, x: x, y: y,
-              posX: (x*(this.width/6))+this.halfWidth,
-              posY: (y*(this.height/6))+this.halfHeight
+              posX: (x*(settings.width/6))+settings.halfWidth,
+              posY: (y*(settings.height/6))+settings.halfHeight
             }
           }
         }
@@ -116,8 +113,8 @@
         return {
           calculate: function() {
             if (t >= 500.0) t = 0.0;
-            if (x*60 > this.halfWidth+1 || x*60 < -this.halfWidth-1) x = 0;
-            if (y*50 > this.halfHeight+1 || y*50 < -this.halfHeight-1) y = 0;
+            if (x*60 > settings.halfWidth+1 || x*60 < -settings.halfWidth-1) x = 0;
+            if (y*50 > settings.halfHeight+1 || y*50 < -settings.halfHeight-1) y = 0;
             else t += 0.1;
             var h = 0.1;
             var a = 0.25;
@@ -130,8 +127,8 @@
             y = _y;
             return {
               time: t*10, x: x, y: y,
-              posX: (x*(this.width/6))+this.halfWidth,
-              posY: (y*(this.height/6))+this.halfHeight
+              posX: (x*(settings.width/6))+settings.halfWidth,
+              posY: (y*(settings.height/6))+settings.halfHeight
             }
           }
         }
@@ -159,8 +156,8 @@
             z = _z;
             return {
               time: t, x: x, y: y, z: z,
-              posX: (y*(this.width/55))+this.halfWidth,
-              posY: z*(this.height/55),
+              posX: (y*(settings.width/55))+settings.halfWidth,
+              posY: z*(settings.height/55),
               posZ: x/10
             }
           }
@@ -179,12 +176,12 @@
             z++;
             x = Math.cos(t/10);
             y = Math.sin((t+50)/20);
-            if (z > this.height) {
+            if (z > settings.height) {
               z = 0;
             }
             return {
               time: t, x: x, y: y, z: z,
-              posX: (x*this.halfWidth*.9)+this.halfWidth,
+              posX: (x*settings.halfWidth*.9)+settings.halfWidth,
               posY: z,
               posZ: y*2
             }
@@ -197,21 +194,19 @@
       var calc = new calculators[type]();
 
       var c = this.getContext('2d');
-      calc.width = c.canvas.width;
-      calc.height = c.canvas.height;
-      calc.halfHeight = calc.height/2;
-      calc.halfWidth = calc.width/2;
-      calc.half = calc.halfWidth < calc.halfHeight ? calc.halfWidth : calc.halfHeight;
+      settings.width = c.canvas.width;
+      settings.height = c.canvas.height;
+      settings.halfHeight = settings.height/2;
+      settings.halfWidth = settings.width/2;
+      settings.half = settings.halfWidth < settings.halfHeight ? settings.halfWidth : settings.halfHeight;
 
       var now, delta;
       var then = Date.now();
       var interval = 1000/settings.fps;
       var $this = $(this);
 
-      var $pauseButton = settings.pause == "default" ? $this : $(settings.pause);
-
       var draw = function() {
-        $this.attr("data-raf", requestAnimationFrame(draw));
+        requestAnimationFrame(draw);
 
         now = Date.now();
         delta = now - then;
@@ -219,21 +214,22 @@
         if (delta >= interval) {
           then = now - (delta % interval);
 
-          if (!$pauseButton.hasClass("paused")) { settings.shape(calc, c); }
+          if (!$this.hasClass("paused")) {
+            settings.shape(calc.calculate(), c);
+          }
         }
       }
 
       draw();
 
-      if (settings.pause == "default") {
-        $pauseButton.click(function() {
-          if ($pauseButton.hasClass("paused")) {
-            $pauseButton.removeClass("paused");
-          } else {
-            $pauseButton.addClass("paused");
-          }
-        });
-      }
+      $this.click(function() {
+        if ($this.hasClass("paused")) {
+          $this.removeClass("paused");
+        } else {
+          $this.addClass("paused");
+        }
+      });
     });
   }
 })(jQuery);
+
