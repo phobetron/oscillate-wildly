@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Oscillate Wildly — Oscillators, curves, and attractors</title>
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <p class="eyebrow">Oscillate Wildly</p>
+        <h1>Oscillators, curves, and attractors</h1>
+        <p class="intro">Explore parametric curves, the Van der Pol and Duffing oscillators, and the Lorenz attractor. Adjust their parameters, framing, and renderer.</p>
+      </header>
+      <section class="controls" aria-label="Animation controls">
+        <label>Motion
+          <select id="motion">
+            <option value="ellipse">Ellipse</option><option value="rose">Rose</option><option value="lissajous">Lissajous</option><option value="helix">Helix</option><option value="vander-pol">Van der Pol</option><option value="duffing">Duffing</option><option value="lorenz">Lorenz</option>
+          </select>
+        </label>
+        <label>Renderer
+          <select id="renderer"><option value="canvas">Canvas</option><option value="dom">DOM</option><option value="svg">SVG</option></select>
+        </label>
+        <label>Fit
+          <select id="fit"><option value="cover">Cover</option><option value="contain">Contain</option><option value="stretch">Stretch</option></select>
+        </label>
+        <label>Zoom <output id="zoom-value" for="zoom">1.0×</output>
+          <input id="zoom" type="range" min="0.5" max="1.5" value="1" step="0.1" />
+        </label>
+        <label>Horizontal position <output id="offset-x-value" for="offset-x">0%</output>
+          <input id="offset-x" type="range" min="-1" max="1" value="0" step="0.05" />
+        </label>
+        <label>Vertical position <output id="offset-y-value" for="offset-y">0%</output>
+          <input id="offset-y" type="range" min="-1" max="1" value="0" step="0.05" />
+        </label>
+        <label>Overflow
+          <select id="overflow"><option value="clip">Clip</option><option value="visible">Visible</option></select>
+        </label>
+        <p id="overflow-note" class="control-note">Canvas pixels always clip to its bitmap.</p>
+        <div class="button-row"><button id="pause" type="button">Pause</button><button id="reset" type="button">Reset</button></div>
+      </section>
+      <section class="extra-controls" aria-label="Appearance and equation controls">
+        <fieldset>
+          <legend>Appearance</legend>
+          <div class="field-grid">
+            <label>Marker color <input id="marker-color" type="color" value="#67e8f9" /></label>
+            <label>Marker radius <output id="marker-size-value" for="marker-size">9 px</output>
+              <input id="marker-size" type="range" min="3" max="24" value="9" step="1" />
+            </label>
+            <label class="check-label"><input id="show-trail" type="checkbox" /> Show trail</label>
+            <label class="check-label"><input id="show-path" type="checkbox" /> Show full path</label>
+          </div>
+          <p id="visual-note" class="control-note">Trails and full paths are available for Canvas and SVG; full paths require a periodic motion.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Equation</legend>
+          <div id="parameter-controls" class="field-grid"></div>
+        </fieldset>
+        <fieldset>
+          <legend>Custom projected bounds</legend>
+          <label class="check-label"><input id="custom-bounds" type="checkbox" /> Override the motion’s calibrated bounds</label>
+          <div id="bounds-controls" class="field-grid">
+            <label>Min X <input id="min-x" type="number" step="any" /></label>
+            <label>Max X <input id="max-x" type="number" step="any" /></label>
+            <label>Min Y <input id="min-y" type="number" step="any" /></label>
+            <label>Max Y <input id="max-y" type="number" step="any" /></label>
+          </div>
+        </fieldset>
+        <button id="defaults" type="button">Restore playground defaults</button>
+      </section>
+      <section class="stage-shell" aria-label="Animation output">
+        <canvas id="canvas-stage" class="stage" width="1280" height="720" aria-label="Canvas animation"></canvas>
+        <div id="dom-stage" class="stage dom-stage" aria-label="DOM animation"><div id="dom-marker" class="dom-marker" aria-hidden="true"></div></div>
+        <svg id="svg-stage" class="stage svg-stage" viewBox="0 0 1280 720" role="img" aria-label="SVG animation"><path id="svg-full-path" /><path id="svg-trail" /><g id="svg-marker"><circle r="13"></circle></g></svg>
+      </section>
+      <p id="status" class="status" aria-live="polite"></p>
+    </main>
+  </body>
+</html>

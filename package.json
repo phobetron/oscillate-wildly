@@ -1,0 +1,95 @@
+{
+  "name": "oscillate-wildly",
+  "version": "1.0.0",
+  "description": "Oscillators and fractal motion sources for the web.",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "packageManager": "pnpm@12.7.0+sha512.9c56477e360068d6e9dca6a92efb4e46b3dc5a52fcebf3d84d78b9736c0ded589a561621a52f68219a7a39facc63cdc079c3226ef9c9d5f02b79f74e69a807b6",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./motions/duffing": {
+      "types": "./dist/motions/duffing.d.ts",
+      "import": "./dist/motions/duffing.js"
+    },
+    "./motions/ellipse": {
+      "types": "./dist/motions/ellipse.d.ts",
+      "import": "./dist/motions/ellipse.js"
+    },
+    "./motions/helix": {
+      "types": "./dist/motions/helix.d.ts",
+      "import": "./dist/motions/helix.js"
+    },
+    "./motions/lissajous": {
+      "types": "./dist/motions/lissajous.d.ts",
+      "import": "./dist/motions/lissajous.js"
+    },
+    "./motions/lorenz": {
+      "types": "./dist/motions/lorenz.d.ts",
+      "import": "./dist/motions/lorenz.js"
+    },
+    "./motions/rose": {
+      "types": "./dist/motions/rose.d.ts",
+      "import": "./dist/motions/rose.js"
+    },
+    "./motions/vander-pol": {
+      "types": "./dist/motions/vanderPol.d.ts",
+      "import": "./dist/motions/vanderPol.js"
+    },
+    "./canvas": {
+      "types": "./dist/canvas/index.d.ts",
+      "import": "./dist/canvas/index.js"
+    },
+    "./dom": {
+      "types": "./dist/dom/index.d.ts",
+      "import": "./dist/dom/index.js"
+    },
+    "./svg": {
+      "types": "./dist/svg/index.d.ts",
+      "import": "./dist/svg/index.js"
+    },
+    "./canvas/trail": {
+      "types": "./dist/canvas/trail.d.ts",
+      "import": "./dist/canvas/trail.js"
+    },
+    "./canvas/path": {
+      "types": "./dist/canvas/path.d.ts",
+      "import": "./dist/canvas/path.js"
+    },
+    "./svg/trail": {
+      "types": "./dist/svg/trail.d.ts",
+      "import": "./dist/svg/trail.js"
+    },
+    "./svg/path": {
+      "types": "./dist/svg/path.d.ts",
+      "import": "./dist/svg/path.js"
+    }
+  },
+  "scripts": {
+    "build": "rslib build",
+    "dev": "rsbuild dev",
+    "test": "rstest",
+    "test:browser": "pnpm build && rsbuild build && node tests/browser/smoke.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@rsbuild/core": "2.2.9",
+    "@rslib/core": "^1.0.2",
+    "@rstest/core": "^0.12.2",
+    "playwright": "^1.55.0",
+    "typescript": "^5.9.2"
+  }
+}
