@@ -1,8 +1,17 @@
 {
   "name": "oscillate-wildly",
   "version": "1.0.0",
-  "description": "Oscillators and fractal motion sources for the web.",
+  "description": "Animated oscillators, parametric curves, and attractors for the web.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/phobetron/oscillate-wildly.git"
+  },
+  "homepage": "https://github.com/phobetron/oscillate-wildly#readme",
+  "bugs": {
+    "url": "https://github.com/phobetron/oscillate-wildly/issues"
+  },
   "types": "./dist/index.d.ts",
   "sideEffects": false,
   "files": [
@@ -80,6 +89,7 @@
   },
   "scripts": {
     "build": "rslib build",
+    "prepack": "pnpm build",
     "dev": "rsbuild dev",
     "test": "rstest",
     "test:browser": "pnpm build && rsbuild build && node tests/browser/smoke.mjs",
