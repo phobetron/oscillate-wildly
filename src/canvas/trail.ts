@@ -1,8 +1,9 @@
 import type { CanvasRenderer } from '../canvas';
 import type { Pose } from '../core';
+import { createTrailHistory } from '../runtime/trail';
 
 export interface CanvasTrailOptions {
-  /** Maximum retained positions. Defaults to 128. */
+  /** Maximum retained positions. Must be a positive safe integer. Defaults to 128. */
   readonly maxSamples?: number;
   readonly color?: string | CanvasGradient | CanvasPattern;
   /** Line width in CSS pixels. Defaults to 1. */
@@ -18,22 +19,11 @@ export type CanvasTrailRenderer<State> = CanvasRenderer<State> & { clear(): void
 export const createCanvasTrail = <State>(
   options: CanvasTrailOptions = {},
 ): CanvasTrailRenderer<State> => {
-  const maxSamples = options.maxSamples ?? 128;
-  if (!Number.isSafeInteger(maxSamples) || maxSamples < 1) {
-    throw new RangeError('maxSamples must be a positive integer');
-  }
-  const samples: Pose[] = [];
-  let previousElapsedSeconds: number | undefined;
+  const history = createTrailHistory<Pose>(options.maxSamples);
 
   const render: CanvasTrailRenderer<State> = (context, frame) => {
-    if (previousElapsedSeconds !== undefined
-      && previousElapsedSeconds > 0
-      && frame.elapsedSeconds === 0) {
-      samples.length = 0;
-    }
-    previousElapsedSeconds = frame.elapsedSeconds;
-    samples.push(frame.pose);
-    if (samples.length > maxSamples) samples.shift();
+    history.add({ ...frame.pose }, frame.elapsedSeconds);
+    const samples = history.values();
     if (samples.length < 2) return;
 
     context.save();
@@ -52,9 +42,6 @@ export const createCanvasTrail = <State>(
       context.restore();
     }
   };
-  render.clear = () => {
-    samples.length = 0;
-    previousElapsedSeconds = undefined;
-  };
+  render.clear = history.clear;
   return render;
 };

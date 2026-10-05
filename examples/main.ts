@@ -23,6 +23,7 @@ import { createSvgStaticPath, type SvgStaticPath } from '../src/svg/path';
 import { createSvgTrail } from '../src/svg/trail';
 import type { Controller } from '../src/runtime';
 import { animateWebGL, type WebGLColor, type WebGLController } from '../src/webgl';
+import { orbitCamera } from './orbitCamera';
 
 import './styles.css';
 
@@ -94,6 +95,7 @@ const colorInput = required<HTMLInputElement>('#marker-color');
 const sizeInput = required<HTMLInputElement>('#marker-size');
 const sizeValue = required<HTMLOutputElement>('#marker-size-value');
 const trailInput = required<HTMLInputElement>('#show-trail');
+const trailLengthInput = required<HTMLInputElement>('#trail-length');
 const pathInput = required<HTMLInputElement>('#show-path');
 const visualNote = required<HTMLElement>('#visual-note');
 const webglView = required<HTMLSelectElement>('#webgl-view');
@@ -160,8 +162,19 @@ let motionBounds: Bounds;
 let staticPath: SvgStaticPath | undefined;
 let clearTrail: (() => void) | undefined;
 let disposeTrail: (() => void) | undefined;
+let cameraPreset: 'front' | 'oblique' = 'oblique';
+let draggedCamera: OrthographicCamera | undefined;
+let cameraDrag: { pointerId: number; x: number; y: number } | undefined;
+
+const endCameraDrag = (): void => {
+  const pointerId = cameraDrag?.pointerId;
+  cameraDrag = undefined;
+  webglCanvas.removeAttribute('data-dragging');
+  if (pointerId !== undefined && webglCanvas.hasPointerCapture(pointerId)) webglCanvas.releasePointerCapture(pointerId);
+};
 
 const disposeCurrent = (): void => {
+  endCameraDrag();
   controller?.dispose();
   controller = undefined;
   webglController = undefined;
@@ -232,27 +245,32 @@ const updateAvailability = (motion: MotionSource<unknown>): void => {
   webglView.querySelector<HTMLOptionElement>('option[value="spatial"]')!.disabled = !spatialMotion;
   webglView.disabled = !webgl;
   webglCamera.disabled = !webgl || webglView.value !== 'spatial';
+  const canOrbit = webgl && webglView.value === 'spatial';
+  webglCanvas.toggleAttribute('data-orbit-enabled', canOrbit);
+  webglCanvas.tabIndex = canOrbit ? 0 : -1;
+  if (!canOrbit) endCameraDrag();
   for (const control of [webglShape, webglColorMode, webglAccumulate, clearDrawingButton]) control.disabled = !webgl;
   webglNote.textContent = !webgl
     ? 'Choose WebGL for 3D Lissajous, Helix, Lorenz, or Duffing phase space.'
     : motionSelect.value === 'duffing'
-      ? 'Duffing phase space: radius shows displacement, height shows velocity, and angle shows forcing phase. Camera changes clear the drawing; clear keeps time, while reset restarts it.'
-      : 'Lissajous, Helix, and Lorenz offer XYZ motion. Camera and framing changes clear the drawing; clear keeps motion time, while reset restarts it. Markers are opaque.';
-  trailInput.disabled = dom || webgl;
+      ? 'Duffing phase space: radius shows displacement, height shows velocity, and angle shows forcing phase. Trails follow view changes; accumulation clears. Clear keeps time; reset restarts it.'
+      : 'Lissajous, Helix, and Lorenz offer XYZ motion. Trails follow view changes; accumulation clears. Clear keeps motion time; reset restarts it. Drawing is opaque.';
+  if (canOrbit) webglNote.textContent += ' Drag with a mouse or one finger to orbit; arrow keys also rotate the view. Choose a camera preset to restore its angle.';
+  trailInput.disabled = dom;
+  trailLengthInput.disabled = dom || !trailInput.checked;
   pathInput.disabled = dom || webgl || motion.kind !== 'analytic';
-  visualNote.textContent = webgl
-    ? 'Use Accumulate drawing to add markers with hardware depth testing. All renderers use the motion’s hidden-coordinate size cue; marker-size scale and view depth are independent.'
-    : dom
-    ? 'DOM moves your styled marker; Canvas and SVG provide the optional trail and full-path helpers.'
-    : motion.kind === 'stateful'
-      ? 'Trails are available. Full paths require a periodic motion.'
-      : 'Trails and full paths are optional and use bounded or cached geometry.';
+  const tailNote = 'Tail length bounds the retained trail samples; the oldest expire as motion advances.';
+  visualNote.textContent = dom
+    ? 'DOM moves your styled marker; Canvas, SVG, and WebGL provide optional trails. Full paths are available for periodic motions on Canvas and SVG.'
+    : webgl
+      ? `${tailNote} Trails follow the current view. Accumulate drawing retains markers in a fixed view; choose one. Both use hardware depth testing. Marker-size scale and view depth are independent.`
+      : `${tailNote} Full paths ${motion.kind === 'stateful' ? 'require a periodic motion' : 'use cached geometry'}.`;
 };
 
 const spatialView = (): boolean => rendererSelect.value === 'webgl' && webglView.value === 'spatial';
 
-// These are application camera presets, independent of the rendering adapter.
-const cameraForView = (): OrthographicCamera | undefined => {
+// The example owns camera interaction; the rendering adapter receives snapshots.
+const presetCameraForView = (): OrthographicCamera | undefined => {
   if (!spatialView()) return undefined;
   const helix = motionSelect.value === 'helix';
   const centerZ = helix ? valuesFor('helix').turns / 4 : 0;
@@ -262,20 +280,48 @@ const cameraForView = (): OrthographicCamera | undefined => {
   if (motionSelect.value === 'duffing' || motionSelect.value === 'lissajous') {
     const viewExtent = motionSelect.value === 'duffing' ? 2.1 : 1.7;
     return {
-      position: webglCamera.value === 'front' ? { x: 0, y: 0, z: 7 } : { x: 5, y: 4, z: 5 },
+      position: cameraPreset === 'front' ? { x: 0, y: 0, z: 7 } : { x: 5, y: 4, z: 5 },
       target: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 },
       near: 0.1, far: 14,
       bounds: { minX: -viewExtent, maxX: viewExtent, minY: -viewExtent, maxY: viewExtent },
     };
   }
   return {
-    position: webglCamera.value === 'front'
+    position: cameraPreset === 'front'
       ? { x: 0, y: -7, z: centerZ }
       : { x: 5, y: -5, z: centerZ + 4 },
     target: { x: 0, y: 0, z: centerZ }, up: { x: 0, y: 0, z: 1 },
     near: 0.1, far: 14,
     bounds: { minX: -extent, maxX: extent, minY: -extent, maxY: extent },
   };
+};
+
+const cameraForView = (): OrthographicCamera | undefined => {
+  const preset = presetCameraForView();
+  if (!preset || !draggedCamera) return preset;
+  const target = preset.target!;
+  const previousTarget = draggedCamera.target!;
+  return {
+    ...preset,
+    // Equation changes can move the helix's center; retain the viewing angle
+    // around its new target and use the new motion's camera bounds.
+    position: {
+      x: target.x + draggedCamera.position.x - previousTarget.x,
+      y: target.y + draggedCamera.position.y - previousTarget.y,
+      z: target.z + draggedCamera.position.z - previousTarget.z,
+    },
+  };
+};
+
+const rotateCamera = (deltaX: number, deltaY: number): void => {
+  const camera = cameraForView();
+  if (!webglController || !camera || (deltaX === 0 && deltaY === 0)) return;
+  const next = orbitCamera(camera, deltaX, deltaY);
+  webglController.setCamera(next);
+  draggedCamera = next;
+  const alreadyDragged = webglCamera.value === 'custom';
+  webglCamera.value = 'custom';
+  if (!alreadyDragged) updateStatus();
 };
 
 const selectedColor = (): WebGLColor => {
@@ -299,13 +345,25 @@ const applyMarkerStyle = (): void => {
   svgTrailPath.style.stroke = `${color}aa`;
 };
 
+const trailDescription = (): string => `bounded trail (${trailLengthInput.value} samples)`;
+
+const readTrailLimit = (): number => {
+  const count = trailLengthInput.valueAsNumber;
+  if (!trailLengthInput.checkValidity() || !Number.isSafeInteger(count) || count < 1) {
+    throw new RangeError('Tail length must be a positive safe integer (1–9007199254740991 samples). The current animation is unchanged.');
+  }
+  return count;
+};
+
 const updateStatus = (): void => {
   const bitmap = rendererSelect.value === 'canvas' || rendererSelect.value === 'webgl';
   const overflow = bitmap ? 'bitmap clipping' : `${overflowSelect.value} overflow`;
   const webgl = rendererSelect.value === 'webgl'
-    ? ` ${spatialView() ? `${motionSelect.value === 'duffing' ? '3D phase space' : 'True 3D'}, ${webglCamera.value} orthographic camera` : 'Planar coordinates'}; ${webglAccumulate.checked ? 'accumulating drawing' : 'current marker only'}.`
+    ? ` ${spatialView() ? `${motionSelect.value === 'duffing' ? '3D phase space' : 'True 3D'}, ${draggedCamera ? 'dragged' : cameraPreset} orthographic camera` : 'Planar coordinates'}; ${trailInput.checked ? trailDescription() : webglAccumulate.checked ? 'accumulating drawing' : 'current marker only'}.`
     : '';
-  status.textContent = `${motionSelect.selectedOptions[0].text} on ${rendererSelect.selectedOptions[0].text}; ${fitSelect.value} at ${zoomInput.value}×, position ${offsetXValue.value}/${offsetYValue.value}, ${overflow}.${webgl}`;
+  const trail = rendererSelect.value !== 'webgl' && rendererSelect.value !== 'dom' && trailInput.checked
+    ? ` ${trailDescription()}.` : '';
+  status.textContent = `${motionSelect.selectedOptions[0].text} on ${rendererSelect.selectedOptions[0].text}; ${fitSelect.value} at ${zoomInput.value}×, position ${offsetXValue.value}/${offsetYValue.value}, ${overflow}.${webgl}${trail}`;
 };
 
 const mount = (): void => {
@@ -315,6 +373,7 @@ const mount = (): void => {
     updateAvailability(motion);
     setBoundsInputs(cameraForView()?.bounds ?? motion.bounds);
     const framing = readFraming();
+    const maxSamples = trailInput.checked && !trailInput.disabled ? readTrailLimit() : 128;
     disposeCurrent();
     const renderer = rendererSelect.value as RendererName;
     activeStage(renderer);
@@ -324,7 +383,7 @@ const mount = (): void => {
 
     if (renderer === 'canvas') {
       const trail = trailInput.checked && !trailInput.disabled
-        ? createCanvasTrail<unknown>({ color: `${color}aa`, width: 2 }) : undefined;
+        ? createCanvasTrail<unknown>({ maxSamples, color: `${color}aa`, width: 2 }) : undefined;
       const path = pathInput.checked && !pathInput.disabled && motion.kind === 'analytic'
         ? createCanvasPath(motion, { color: `${color}66`, width: 1 }) : undefined;
       clearTrail = trail?.clear;
@@ -341,6 +400,7 @@ const mount = (): void => {
       webglController = animateWebGL(webglCanvas, motion, {
         framing, autoplay: !manuallyPaused,
         camera: cameraForView(), accumulate: webglAccumulate.checked,
+        trail: trailInput.checked ? { maxSamples, width: 2 } : false,
         position(frame): Point3D {
           if (!spatialView()) return { x: frame.pose.x, y: frame.pose.y, z: frame.pose.z ?? 0 };
           if (motionSelect.value === 'duffing') {
@@ -379,7 +439,7 @@ const mount = (): void => {
       staticPath = pathInput.checked && !pathInput.disabled && motion.kind === 'analytic'
         ? createSvgStaticPath({ viewport: svgViewport, path: svgFullPath, motion, framing }) : undefined;
       const trail = trailInput.checked && !trailInput.disabled
-        ? createSvgTrail<unknown>({ viewport: svgViewport, path: svgTrailPath }) : undefined;
+        ? createSvgTrail<unknown>({ viewport: svgViewport, path: svgTrailPath, maxSamples }) : undefined;
       clearTrail = trail?.clear;
       disposeTrail = trail?.dispose;
       controller = animateSvg({ viewport: svgViewport, marker: svgMarker }, motion, {
@@ -438,33 +498,87 @@ const renderParameterControls = (): void => {
 };
 
 motionSelect.addEventListener('change', () => {
+  draggedCamera = undefined;
+  webglCamera.value = cameraPreset;
   customBounds.checked = false;
   for (const input of Object.values(boundsInputs)) input.disabled = true;
   renderParameterControls();
   mount();
 });
-rendererSelect.addEventListener('change', mount);
+rendererSelect.addEventListener('change', () => {
+  if (rendererSelect.value === 'webgl' && trailInput.checked) webglAccumulate.checked = false;
+  mount();
+});
 for (const control of [fitSelect, zoomInput, offsetXInput, offsetYInput]) control.addEventListener('input', updateFraming);
 overflowSelect.addEventListener('change', () => { activeStage(rendererSelect.value as RendererName); updateStatus(); });
 for (const control of [colorInput, sizeInput]) control.addEventListener('change', () => {
   updateOutputs();
   if (webglController) updateFraming(); else mount();
 });
-for (const control of [trailInput, pathInput, webglAccumulate]) control.addEventListener('change', mount);
+pathInput.addEventListener('change', mount);
+trailInput.addEventListener('change', () => {
+  if (rendererSelect.value === 'webgl' && trailInput.checked) webglAccumulate.checked = false;
+  mount();
+});
+trailLengthInput.addEventListener('change', mount);
+webglAccumulate.addEventListener('change', () => {
+  if (webglAccumulate.checked) trailInput.checked = false;
+  mount();
+});
 for (const control of [webglShape, webglColorMode]) control.addEventListener('change', updateFraming);
 for (const control of [webglView, webglCamera]) control.addEventListener('change', () => {
   if (!webglController) return;
   try {
+    endCameraDrag();
+    if (control === webglCamera) {
+      cameraPreset = webglCamera.value as 'front' | 'oblique';
+      draggedCamera = undefined;
+    }
     customBounds.checked = false;
     for (const input of Object.values(boundsInputs)) input.disabled = true;
+    // Coordinate views change the position mapping; camera presets reproject trails.
+    if (control === webglView) webglController.clear();
     const camera = cameraForView();
     setBoundsInputs(camera?.bounds ?? motionBounds);
     webglCamera.disabled = !spatialView();
+    updateAvailability(createMotion(motionSelect.value as MotionName));
     webglController.setCamera(camera);
     updateFraming();
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : String(error);
   }
+});
+
+webglCanvas.addEventListener('pointerdown', (event) => {
+  if (!spatialView() || !webglController || !event.isPrimary || event.button !== 0 || cameraDrag) return;
+  webglCanvas.setPointerCapture(event.pointerId);
+  cameraDrag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  webglCanvas.setAttribute('data-dragging', '');
+  webglCanvas.focus({ preventScroll: true });
+  event.preventDefault();
+});
+webglCanvas.addEventListener('pointermove', (event) => {
+  if (cameraDrag?.pointerId !== event.pointerId) return;
+  if (event.pointerType === 'mouse' && (event.buttons & 1) === 0) { endCameraDrag(); return; }
+  const dx = event.clientX - cameraDrag.x;
+  const dy = event.clientY - cameraDrag.y;
+  cameraDrag.x = event.clientX;
+  cameraDrag.y = event.clientY;
+  try { rotateCamera(dx, dy); }
+  catch (error) { endCameraDrag(); status.textContent = error instanceof Error ? error.message : String(error); }
+  event.preventDefault();
+});
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) {
+  webglCanvas.addEventListener(type, (event) => {
+    if (cameraDrag?.pointerId === event.pointerId) endCameraDrag();
+  });
+}
+webglCanvas.addEventListener('keydown', (event) => {
+  if (!spatialView()) return;
+  const delta = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[event.key];
+  if (!delta) return;
+  rotateCamera(delta[0], delta[1]);
+  event.preventDefault();
 });
 clearDrawingButton.addEventListener('click', () => {
   webglController?.clear();
@@ -503,9 +617,12 @@ defaultsButton.addEventListener('click', () => {
   colorInput.value = '#67e8f9';
   sizeInput.value = '9';
   trailInput.checked = false;
+  trailLengthInput.value = '128';
   pathInput.checked = false;
   webglView.value = 'planar';
   webglCamera.value = 'oblique';
+  cameraPreset = 'oblique';
+  draggedCamera = undefined;
   webglShape.value = 'circle';
   webglColorMode.value = 'solid';
   webglAccumulate.checked = false;
@@ -516,6 +633,7 @@ defaultsButton.addEventListener('click', () => {
   mount();
 });
 window.addEventListener('beforeunload', disposeCurrent, { once: true });
+window.addEventListener('blur', endCameraDrag);
 
 for (const input of Object.values(boundsInputs)) input.disabled = true;
 updateOutputs();

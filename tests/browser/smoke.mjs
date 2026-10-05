@@ -91,6 +91,18 @@ try {
   await page.locator('.stage-shell').scrollIntoViewIfNeeded();
   await page.waitForTimeout(80);
   assert.ok((await page.locator('#svg-trail').getAttribute('d'))?.startsWith('M'));
+  assert.equal(await page.locator('#trail-length').isDisabled(), false);
+  await page.locator('#trail-length').fill('3');
+  await page.locator('#trail-length').press('Tab');
+  await page.waitForTimeout(100);
+  assert.equal(((await page.locator('#svg-trail').getAttribute('d'))?.match(/[ML]/g) ?? []).length, 3, 'Configured SVG tail length limits retained points');
+  await page.selectOption('#renderer', 'canvas');
+  assert.equal(await page.locator('#trail-length').isDisabled(), false);
+  assert.equal(await page.locator('#trail-length').inputValue(), '3', 'Configured length is shared across renderers');
+  await page.selectOption('#renderer', 'dom');
+  assert.equal(await page.locator('#show-trail').isDisabled(), true);
+  assert.equal(await page.locator('#trail-length').isDisabled(), true);
+  await page.selectOption('#renderer', 'svg');
   await page.locator('#parameter-controls [data-parameter="radiusX"]').fill('1.5');
   await page.locator('#parameter-controls [data-parameter="radiusX"]').press('Tab');
   await page.selectOption('#motion', 'lorenz');
@@ -100,6 +112,7 @@ try {
   await page.locator('#min-x').press('Tab');
   await page.click('#defaults');
   assert.equal(await page.locator('#show-trail').isChecked(), false);
+  assert.equal(await page.locator('#trail-length').inputValue(), '128');
   assert.equal(await page.locator('#custom-bounds').isChecked(), false);
 
   await page.selectOption('#motion', 'ellipse');
@@ -346,7 +359,7 @@ try {
   await page.evaluate(() => document.querySelector('#pause').click());
   assert.equal(await page.locator('#pause').textContent(), 'Resume');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  assert.equal(await page.locator('#show-trail').isDisabled(), true);
+  assert.equal(await page.locator('#show-trail').isDisabled(), false);
   assert.equal(await page.locator('#show-path').isDisabled(), true);
   assert.equal(await page.locator('#clear-drawing').isDisabled(), false);
   assert.equal(await page.locator('#webgl-camera').isDisabled(), true);
@@ -370,7 +383,25 @@ try {
   assert.notDeepEqual(timeColor.colors, redSquare.colors, 'Time color mode changes the painted color');
   assert.deepEqual(await webglReadout(), beforeTimeColor, 'Time color redraw preserves elapsed motion and pause');
   await webglChange('#webgl-color-mode', 'solid');
+  await webglChange('#show-trail', true);
+  assert.equal(await page.locator('#webgl-accumulate').isChecked(), false);
+  assert.equal(await page.locator('#trail-length').isDisabled(), false);
+  await webglChange('#trail-length', 16);
+  const withTrail = await animateWebGLFor(0.25);
+  assert.ok(withTrail.count > singleFrame.count, 'WebGL Show trail paints a connected tail');
+  const beforeInvalidLength = await webglReadout();
+  for (const length of [0, '', 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    await webglChange('#trail-length', length);
+    assert.match(await page.locator('#status').textContent(), /positive safe integer/, `Invalid tail length ${length} is rejected`);
+    assert.deepEqual(await webglReadout(), beforeInvalidLength, 'Invalid length keeps the existing animation and manual pause');
+  }
+  await webglChange('#trail-length', 16);
+  const beforeTrailClear = await webglReadout();
+  assert.equal((await webglClick('#clear-drawing')).count, 0, 'Clear removes the WebGL tail and marker');
+  assert.deepEqual(await webglReadout(), beforeTrailClear, 'Tail clear preserves motion time and manual pause');
   await webglChange('#webgl-accumulate', true);
+  assert.equal(await page.locator('#show-trail').isChecked(), false);
+  assert.equal(await page.locator('#trail-length').isDisabled(), true);
   await webglClick('#reset');
   assert.equal((await webglReadout()).time, 0, 'Reset returns source elapsed time to zero');
   const accumulated = await animateWebGLFor(0.25);
@@ -431,6 +462,109 @@ try {
       assert.ok(Math.abs((await webglReadout()).depth - spatialFrame.depth) > 0.005, 'Lissajous depth frequency changes the 3D projection at advanced time');
     }
   }
+
+  // Real pointer input exercises capture and browser touch behavior. Raster
+  // reads happen in a listener after the app's pointermove, before compositing.
+  await webglChange('#motion', 'lissajous');
+  await webglChange('#webgl-view', 'spatial');
+  await webglChange('#webgl-camera', 'front');
+  await webglChange('#show-trail', true);
+  await webglChange('#trail-length', 32);
+  await webglChange('#parameter-controls [data-parameter="periodSeconds"]', 4);
+  const orbitInitial = await animateWebGLFor(0.3);
+  const orbitTime = await webglReadout();
+  const orbitStage = page.locator('#webgl-stage');
+  await orbitStage.scrollIntoViewIfNeeded();
+  assert.equal(await orbitStage.evaluate((element) => getComputedStyle(element).touchAction), 'none');
+  await page.evaluate(() => {
+    const canvas = document.querySelector('#webgl-stage');
+    window.orbitRasters = [];
+    const record = () => window.orbitRasters.push(window.demoWebGLPixels());
+    canvas.addEventListener('pointermove', record);
+    window.stopOrbitRecording = () => canvas.removeEventListener('pointermove', record);
+  });
+  const box = await orbitStage.boundingBox();
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  assert.equal(await orbitStage.getAttribute('data-dragging'), '');
+  await page.mouse.move(start.x + 100, start.y + 60, { steps: 5 });
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'custom');
+  const mouseOrbit = await page.evaluate(() => window.orbitRasters.at(-1));
+  assert.ok(mouseOrbit.count > 0, 'Mouse orbit retains and reprojects the tail');
+  assert.notEqual(mouseOrbit.hash, orbitInitial.hash, 'Mouse drag changes the actual 3D view');
+  assert.equal((await webglReadout()).time, orbitTime.time, 'Orbit preserves motion time');
+  assert.equal((await webglReadout()).pause, 'Resume', 'Orbit preserves manual pause');
+  await page.mouse.move(box.x + box.width + 20, start.y, { steps: 2 });
+  const outsideOrbit = await page.evaluate(() => window.orbitRasters.at(-1));
+  assert.notEqual(outsideOrbit.hash, mouseOrbit.hash, 'Pointer capture continues orbiting outside the canvas');
+  await page.mouse.up();
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null);
+  const releasedView = await webglReadout();
+  await page.mouse.move(start.x, start.y);
+  assert.deepEqual(await webglReadout(), releasedView, 'Mouse hover after release does not rotate');
+  await webglChange('#webgl-camera', 'front');
+  const restoredFront = await webglChange('#marker-size', 24);
+  assert.equal(restoredFront.hash, orbitInitial.hash, 'Selecting the preset restores the original view and retained tail');
+  assert.equal((await webglReadout()).time, orbitTime.time);
+
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up();
+  await page.mouse.move(start.x + 30, start.y + 20);
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Releasing the primary button ends orbit even while another button is held');
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'front', 'Secondary mouse buttons cannot continue orbiting');
+  await page.mouse.up({ button: 'right' });
+
+  const touch = await page.context().newCDPSession(page);
+  await touch.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+  const touchPoint = (x, y) => ({ x, y, id: 1, radiusX: 1, radiusY: 1, force: 1 });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touchPoint(start.x, start.y)] });
+  assert.equal(await orbitStage.getAttribute('data-dragging'), '');
+  const scrollBeforeTouch = await page.evaluate(() => window.scrollY);
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [touchPoint(start.x - 80, start.y + 50)] });
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'custom');
+  const touchOrbit = await page.evaluate(() => window.orbitRasters.at(-1));
+  assert.notEqual(touchOrbit.hash, orbitInitial.hash, 'Touch drag changes the actual 3D view');
+  assert.equal(await page.evaluate(() => window.scrollY), scrollBeforeTouch, 'Touch orbit does not scroll the page');
+  assert.equal((await webglReadout()).time, orbitTime.time);
+  assert.equal((await webglReadout()).pause, 'Resume');
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Touch cancellation releases drag state');
+  const cancelledView = await webglReadout();
+  await page.mouse.move(start.x + 30, start.y + 10);
+  assert.deepEqual(await webglReadout(), cancelledView, 'Hover after touch cancellation does not rotate');
+  await webglChange('#webgl-camera', 'front');
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touchPoint(start.x, start.y)] });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [touchPoint(start.x + 50, start.y - 20)] });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Touch release permits a new drag');
+  await touch.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await touch.detach();
+
+  await webglChange('#webgl-camera', 'front');
+  await orbitStage.focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'custom', 'Keyboard arrows rotate the camera');
+  assert.equal((await webglReadout()).time, orbitTime.time);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  assert.equal(await orbitStage.getAttribute('data-dragging'), '');
+  await webglChange('#webgl-view', 'planar');
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Switching views mid-drag releases pointer capture');
+  await page.mouse.up();
+  assert.notEqual(await orbitStage.evaluate((element) => getComputedStyle(element).touchAction), 'none', 'Planar view retains normal touch scrolling');
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 60, start.y + 30);
+  await page.mouse.up();
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Planar view does not capture drags');
+  await page.evaluate(() => window.stopOrbitRecording());
+  await webglChange('#show-trail', false);
+  await webglChange('#motion', 'duffing');
+  await webglChange('#webgl-view', 'spatial');
+  await webglChange('#webgl-camera', 'front');
 
   await webglChange('#webgl-accumulate', false);
   await webglChange('#parameter-controls [data-parameter="angularFrequency"]', 10);
@@ -582,6 +716,48 @@ try {
     if (document.elementFromPoint(svgX, svgY) === dot) throw new Error('SVG clipped overflow remained visible');
     svgController.dispose();
     svg.remove();
+  });
+
+  await page.evaluate(async () => {
+    const { createCanvasTrail } = await import('/lib/canvas/trail.js');
+    const { createSvgTrail } = await import('/lib/svg/trail.js');
+    for (const maxSamples of [3, 16]) {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 100;
+      const context = canvas.getContext('2d');
+      const canvasTrail = createCanvasTrail({ maxSamples, color: 'red', width: 4 });
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 100 100');
+      svg.style.cssText = 'position:fixed;left:0;top:0;width:100px;height:100px';
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      svg.append(path);
+      document.body.append(svg);
+      const svgTrail = createSvgTrail({ viewport: svg, path, maxSamples });
+      const makeFrame = (index) => {
+        const pose = index === 0 ? { x: 20, y: 20 } : index === 1 ? { x: 20, y: 50 } : { x: 80, y: 50 };
+        return { state: null, pose, position: pose, viewport: { width: 100, height: 100 }, elapsedSeconds: index,
+          project: (point) => ({ ...point, scaleX: 1, scaleY: 1 }) };
+      };
+      const draw = (frame) => {
+        context.clearRect(0, 0, 100, 100);
+        canvasTrail(context, frame);
+        svgTrail.render(frame);
+      };
+      try {
+        for (let index = 0; index < 132; index++) draw(makeFrame(index));
+        const rgba = [...context.getImageData(20, 35, 1, 1).data];
+        const expected = [0, 0, 0, 0];
+        if (rgba.some((value, channel) => value !== expected[channel])) throw new Error(`Canvas tail retained incorrect history with maxSamples=${maxSamples}: ${rgba}`);
+        const commands = path.getAttribute('d').match(/[ML]/g).length;
+        if (commands !== maxSamples) throw new Error(`SVG retained incorrect tail length with maxSamples=${maxSamples}: ${commands}`);
+        draw(makeFrame(131));
+        if (path.getAttribute('d').match(/[ML]/g).length !== commands) throw new Error('Paused SVG redraw aged history');
+        canvasTrail.clear(); svgTrail.clear();
+        draw(makeFrame(131));
+        if (path.getAttribute('d').match(/[ML]/g).length !== 1) throw new Error('Clear failed to discard SVG history');
+        if (context.getImageData(20, 35, 1, 1).data[3] !== 0) throw new Error('Clear failed to discard Canvas history');
+      } finally { svgTrail.dispose(); svg.remove(); }
+    }
   });
 
   await page.evaluate(async () => {
@@ -753,6 +929,62 @@ try {
       };
     };
     try {
+      const tail = fixture([
+        { pose: { x: -0.8 }, skip: true }, { pose: { x: -0.4 }, skip: true },
+        { pose: { x: 0.4, depth: 0.01 }, skip: true }, { pose: { x: 0.8 }, skip: true },
+      ], { accumulate: false, trail: { maxSamples: 2, width: 6 } });
+      tail.advance(1);
+      tail.pixel(20, 50, red, 'Tail connects retained samples');
+      tail.advance(2);
+      tail.pixel(20, 50, blank, 'Expired tail segment disappears');
+      tail.pixel(50, 52, red, 'Tail width uses CSS pixels independently of pose depth');
+      tail.pixel(50, 55, blank, 'Tail width is bounded');
+      for (let redraw = 0; redraw < 4; redraw++) tail.controller.setFraming({ fit: 'stretch' });
+      tail.pixel(50, 50, red, 'Paused redraws do not age the tail');
+      tail.advance(3);
+      tail.pixel(50, 50, blank, 'Tail remains bounded after ring buffer wraps');
+      tail.pixel(80, 50, red, 'Latest segment survives ring buffer wrap');
+      tail.canvas.width = tail.canvas.height = 200;
+      await Promise.resolve();
+      tail.pixel(80, 52, red, 'Bitmap resize retains tail with CSS pixel width');
+      tail.pixel(80, 55, blank, 'High-resolution bitmap preserves tail width');
+      let restoreTail = await lose(tail);
+      await restoreTail();
+      tail.pixel(80, 50, red, 'Context restoration reprojects retained tail');
+      tail.controller.clear();
+      tail.pixel(80, 50, blank, 'Clear removes tail output');
+      tail.controller.setFraming({ fit: 'stretch' });
+      tail.pixel(80, 50, blank, 'Clear discards retained samples');
+      tail.advance(1);
+      tail.controller.reset();
+      tail.pixel(50, 50, blank, 'Reset discards the tail and any old connector');
+      tail.dispose();
+
+      const tailCamera = { position: { x: 0, y: 0, z: 5 }, bounds, near: 1, far: 9 };
+      for (const nearTail of [false, true]) {
+        const lineZ = nearTail ? 2 : -2;
+        const crossing = fixture([
+          { pose: { x: -0.8, z: lineZ }, skip: true },
+          { pose: { x: 0.8, z: lineZ }, skip: true },
+          { pose: { x: 0, z: -lineZ }, marker: { color: [0, 1, 0] } },
+        ], { accumulate: false, trail: { width: 6, color: [1, 0, 0] }, camera: tailCamera });
+        crossing.advance(1); crossing.advance(2);
+        crossing.pixel(50, 50, nearTail ? red : green, `Tail/marker hardware depth occlusion with nearTail=${nearTail}`);
+        crossing.dispose();
+      }
+      const clippedTail = fixture([
+        { pose: { x: -0.8, z: 6 }, skip: true },
+        { pose: { x: 0.8, z: -6 }, skip: true },
+      ], { accumulate: false, trail: { width: 4 }, camera: tailCamera });
+      clippedTail.advance(1);
+      clippedTail.pixel(15, 50, blank, 'Tail clips at the near plane');
+      clippedTail.pixel(50, 50, red, 'Tail crossing both clipping planes retains the visible segment');
+      clippedTail.pixel(85, 50, blank, 'Tail clips at the far plane');
+      clippedTail.controller.setCamera({ ...tailCamera, position: { x: 0, y: 0, z: 8 } });
+      clippedTail.pixel(15, 50, red, 'Camera update reprojects retained XYZ tail');
+      clippedTail.pixel(65, 50, blank, 'Camera update recalculates clipping without old raster output');
+      clippedTail.dispose();
+
       for (const nearFirst of [false, true]) {
         const near = { visibilityDepth: 0.2, marker: { color: [0, 1, 0] } };
         const far = { visibilityDepth: 0.8 };
@@ -912,7 +1144,7 @@ try {
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(failedAssets, []);
 
-  console.log('Browser smoke passed: 28 motion/renderer combinations, controls, consistent Lissajous/Duffing planar depth cue sizes, animated Lissajous size, example WebGL planar/spatial views, camera and appearance pause preservation, accumulation/clear/reset pixels, contain marker bounds, pause, reduced motion, fixed target sizes, transformed SVG, DOM/SVG overflow, WebGL pixels, depth, accumulation, clipping, camera, resize, and context recovery.');
+  console.log('Browser smoke passed: 28 motion/renderer combinations, controls, consistent Lissajous/Duffing planar depth cue sizes, animated Lissajous size, example WebGL planar/spatial views, mouse/touch/keyboard camera orbit and capture cleanup, camera and appearance pause preservation, accumulation/clear/reset pixels, contain marker bounds, pause, reduced motion, fixed target sizes, transformed SVG, DOM/SVG overflow, WebGL pixels, depth, accumulation, bounded tails, clipping, camera, resize, and context recovery.');
 } finally {
   await browser?.close();
   await new Promise((resolveClose) => server.close(resolveClose));

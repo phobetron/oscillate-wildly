@@ -10,7 +10,7 @@
       <header>
         <p class="eyebrow">Oscillate Wildly</p>
         <h1>Oscillators, curves, and attractors</h1>
-        <p class="intro">Explore parametric curves, oscillators, and attractors across four renderers. Use WebGL for 3D Lissajous, helix, and Lorenz motion or Duffing phase space, and accumulate opaque markers with depth testing.</p>
+        <p class="intro">Explore parametric curves, oscillators, and attractors across four renderers. Use WebGL for 3D Lissajous, helix, and Lorenz motion or Duffing phase space, and choose a bounded trail or accumulate opaque markers with depth testing.</p>
       </header>
       <section class="controls" aria-label="Animation controls">
         <label>Motion
@@ -48,9 +48,10 @@
               <input id="marker-size" type="range" min="3" max="24" value="9" step="1" />
             </label>
             <label class="check-label"><input id="show-trail" type="checkbox" /> Show trail</label>
+            <label>Tail length (samples) <input id="trail-length" type="number" min="1" step="1" value="128" required disabled aria-describedby="visual-note" /></label>
             <label class="check-label"><input id="show-path" type="checkbox" /> Show full path</label>
           </div>
-          <p id="visual-note" class="control-note">Trails and full paths are available for Canvas and SVG; full paths require a periodic motion.</p>
+          <p id="visual-note" class="control-note">Trails are available for Canvas, SVG, and WebGL. Full paths require a periodic motion on Canvas or SVG.</p>
         </fieldset>
         <fieldset>
           <legend>WebGL view and drawing</legend>
@@ -58,8 +59,8 @@
             <label>Coordinates
               <select id="webgl-view" aria-describedby="webgl-note"><option value="planar">Planar</option><option value="spatial">3D coordinates</option></select>
             </label>
-            <label>Fixed camera
-              <select id="webgl-camera"><option value="oblique">Oblique</option><option value="front">Front</option></select>
+            <label>Camera preset
+              <select id="webgl-camera"><option value="oblique">Oblique</option><option value="front">Front</option><option value="custom" disabled>Dragged view</option></select>
             </label>
             <label>Marker shape
               <select id="webgl-shape"><option value="circle">Circle</option><option value="square">Square</option></select>
@@ -90,7 +91,7 @@
       </section>
       <section class="stage-shell" aria-label="Animation output">
         <canvas id="canvas-stage" class="stage" width="1280" height="720" aria-label="Canvas animation"></canvas>
-        <canvas id="webgl-stage" class="stage" width="1280" height="720" aria-label="WebGL animation" hidden></canvas>
+        <canvas id="webgl-stage" class="stage" width="1280" height="720" aria-label="WebGL animation" aria-describedby="webgl-note" hidden></canvas>
         <div id="dom-stage" class="stage dom-stage" aria-label="DOM animation"><div id="dom-marker" class="dom-marker" aria-hidden="true"></div></div>
         <svg id="svg-stage" class="stage svg-stage" viewBox="0 0 1280 720" role="img" aria-label="SVG animation"><path id="svg-full-path" /><path id="svg-trail" /><g id="svg-marker"><circle r="13"></circle></g></svg>
       </section>

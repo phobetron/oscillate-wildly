@@ -22,6 +22,7 @@ const context = () => {
     moveTo: (...values: number[]) => operations.push(['moveTo', ...values]),
     lineTo: (...values: number[]) => operations.push(['lineTo', ...values]),
     stroke: () => operations.push(['stroke']),
+    drawImage: (_image: CanvasImageSource, ...values: number[]) => operations.push(['drawImage', ...values]),
   };
   Object.defineProperty(value, 'globalAlpha', {
     get: () => alpha,
@@ -72,13 +73,44 @@ describe('animateCanvas', () => {
   });
 });
 
-const frame = (x: number, y: number): Frame<undefined> => ({
+const frame = (x: number, y: number, elapsedSeconds = x): Frame<undefined> => ({
   state: undefined, pose: { x, y }, position: { x, y, scaleX: 1, scaleY: 1 },
-  viewport: { width: 100, height: 100 }, elapsedSeconds: 0,
+  viewport: { width: 100, height: 100 }, elapsedSeconds,
   project: (pose) => ({ ...pose, scaleX: 1, scaleY: 1 }),
 });
 
 describe('Canvas helpers', () => {
+  it('reprojects paused history without evicting samples and snapshots mutable poses', () => {
+    const drawing = context();
+    const trail = createCanvasTrail<undefined>({ maxSamples: 2 });
+    const pose = { x: 1, y: 1 };
+    trail(drawing.value, { ...frame(1, 1), pose });
+    pose.x = 2;
+    pose.y = 2;
+    trail(drawing.value, { ...frame(2, 2), pose });
+    drawing.operations.length = 0;
+    const paused = {
+      ...frame(3, 3, 2),
+      project: (sample: typeof pose) => ({ x: sample.x * 10, y: sample.y * 10, scaleX: 10, scaleY: 10 }),
+    };
+    trail(drawing.value, paused);
+    trail(drawing.value, paused);
+    expect(drawing.operations.filter(([name]) => name === 'moveTo')).toEqual([
+      ['moveTo', 10, 10], ['moveTo', 10, 10],
+    ]);
+    expect(drawing.operations).toContainEqual(['lineTo', 30, 30]);
+    trail.clear();
+    drawing.operations.length = 0;
+    trail(drawing.value, paused);
+    expect(drawing.operations).toEqual([]);
+  });
+
+  it('rejects invalid trail capacities', () => {
+    for (const maxSamples of [Infinity, -Infinity, NaN, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => createCanvasTrail({ maxSamples })).toThrow(RangeError);
+    }
+  });
+
   it('keeps world-space history bounded and reprojects it after a resize', () => {
     const drawing = context();
     const trail = createCanvasTrail<undefined>({ maxSamples: 2 });

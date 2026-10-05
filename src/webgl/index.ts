@@ -2,8 +2,9 @@ import { projectOrthographic, validateOrthographicCamera } from '../core';
 import type { Framing, MotionSource, OrthographicCamera, Point3D, Pose, ProjectedPose } from '../core';
 import { createController } from '../runtime';
 import type { Controller, Frame, RuntimePlatform } from '../runtime';
+import { createTrailHistory } from '../runtime/trail';
 import { createMarkerRenderer } from './renderer';
-import type { WebGLMarkerOptions } from './renderer';
+import type { WebGLMarkerOptions, WebGLTrailStyle } from './renderer';
 
 export type { WebGLColor, WebGLMarkerOptions } from './renderer';
 
@@ -17,6 +18,13 @@ export interface WebGLFrame<State> extends Frame<State> {
   project(pose: Pose): WebGLProjectedPose;
 }
 
+export interface WebGLTrailOptions extends WebGLTrailStyle {
+  /** Maximum retained positions. Must be a positive safe integer. Defaults to 128. */
+  readonly maxSamples?: number;
+  /** Opaque color for the whole tail. Defaults to the current marker color, or red when skipped. */
+  readonly color?: WebGLTrailStyle['color'];
+}
+
 export interface AnimateWebGLOptions<State> {
   readonly framing?: Framing;
   readonly autoplay?: boolean;
@@ -24,6 +32,8 @@ export interface AnimateWebGLOptions<State> {
   readonly offscreen?: boolean;
   /** Retain color and hardware depth between frames. Defaults to false. */
   readonly accumulate?: boolean;
+  /** Bounded, opaque connected tail. true uses defaults. Cannot be combined with accumulate. */
+  readonly trail?: boolean | WebGLTrailOptions;
   /** Opaque marker appearance, evaluated with the current projected frame. null skips drawing. */
   readonly marker?: WebGLMarkerOptions | ((frame: WebGLFrame<State>) => WebGLMarkerOptions | null);
   /** Fixed orthographic camera. Omit for the existing planar framing. */
@@ -36,9 +46,9 @@ export interface AnimateWebGLOptions<State> {
 }
 
 export interface WebGLController extends Controller {
-  /** Clear color and depth immediately, without resetting or redrawing the motion. */
+  /** Clear color, depth, and tail history immediately, without resetting or redrawing the motion. */
   clear(): void;
-  /** Reproject the current marker and clear accumulation, preserving motion and pause. undefined returns to planar mode. */
+  /** Reproject the marker and retained tail, clearing accumulation and preserving motion/pause. undefined returns to planar mode. */
   setCamera(camera: OrthographicCamera | undefined): void;
 }
 
@@ -55,7 +65,7 @@ const snapshotCamera = (camera: OrthographicCamera | undefined): OrthographicCam
 };
 
 /**
- * Draw opaque camera-facing markers using WebGL 1 and the shared controller.
+ * Draw opaque camera-facing markers and optional tails using WebGL 1.
  * Owns the canvas's GL context, never its CSS or bitmap dimensions. A persistent
  * framebuffer keeps accumulation independent of browser drawing-buffer clears.
  */
@@ -64,6 +74,19 @@ export const animateWebGL = <State>(
   motion: MotionSource<State>,
   options: AnimateWebGLOptions<State> = {},
 ): WebGLController => {
+  const trail = options.trail ? options.trail === true ? {} : options.trail : undefined;
+  const history = trail ? createTrailHistory<{ pose: Pose; visibilityDepth: number }>(trail.maxSamples) : undefined;
+  if (trail) {
+    if (options.accumulate) throw new TypeError('WebGL trail and accumulate cannot be combined');
+    if (!Number.isFinite(trail.width ?? 1) || (trail.width ?? 1) < 0) {
+      throw new RangeError('WebGL trail width must be finite and non-negative');
+    }
+    if (trail.color && (trail.color.length !== 3
+      || !trail.color.every((channel) => Number.isFinite(channel) && channel >= 0 && channel <= 1))) {
+      throw new RangeError('WebGL trail color must contain three RGB channels in [0, 1]');
+    }
+  }
+  const clearTrail = (): void => { history?.clear(); };
   let camera = snapshotCamera(options.camera);
   let framing = options.framing ?? {};
   const gl = canvas.getContext('webgl', { alpha: true, depth: true, antialias: false });
@@ -87,6 +110,7 @@ export const animateWebGL = <State>(
   const cleanup = (): void => {
     if (disposed) return;
     disposed = true;
+    clearTrail();
     stopDimensions();
     renderer?.dispose();
     renderer = undefined;
@@ -102,7 +126,7 @@ export const animateWebGL = <State>(
       autoplay: options.autoplay,
       offscreen: options.offscreen ?? true,
       platform: options.platform,
-      onReset: () => { invalidated = true; },
+      onReset: () => { invalidated = true; clearTrail(); },
       onDispose: cleanup,
       observeAvailability(notify) {
         const onLost = (event: Event): void => {
@@ -164,12 +188,23 @@ export const animateWebGL = <State>(
           origin.x, origin.y, diagonal.x, diagonal.y,
         ]);
         const resized = renderer.resize(canvas.width, canvas.height);
-        if (!options.accumulate || invalidated || key !== viewKey) {
+        if (!options.accumulate || invalidated || key !== viewKey || resized) {
           if (!resized) renderer.clear();
         }
         viewKey = key;
         invalidated = false;
         const marker = typeof options.marker === 'function' ? options.marker(webglFrame) : options.marker ?? {};
+        if (trail && history) {
+          if (![pose.x, pose.y, pose.z ?? 0, planarDepth].every(Number.isFinite)) {
+            throw new RangeError('WebGL trail coordinates and visibility depth must be finite');
+          }
+          history.add({ pose: { ...pose }, visibilityDepth: planarDepth }, frame.elapsedSeconds);
+          const positions = history.values().map((retained) => {
+            const projected = project(retained.pose);
+            return camera ? projected : { ...projected, visibilityDepth: retained.visibilityDepth };
+          });
+          renderer.drawTrail(positions, frame.viewport, { width: trail.width, color: trail.color ?? marker?.color });
+        }
         if (marker !== null) renderer.draw(position, position.visibilityDepth, frame.viewport, marker);
         renderer.present();
       },
@@ -200,6 +235,7 @@ export const animateWebGL = <State>(
     },
     clear() {
       if (disposed) return;
+      clearTrail();
       invalidated = true;
       if (lost || !renderer || canvas.width === 0 || canvas.height === 0) return;
       renderer.resize(canvas.width, canvas.height);

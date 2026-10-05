@@ -1,6 +1,6 @@
 # Oscillate Wildly
 
-Oscillate Wildly supplies motion sources and small browser adapters for animating an existing Canvas 2D, WebGL, DOM, or SVG marker. The [interactive example](./examples) switches among all seven motions and all four render targets, with controls for framing, overflow, appearance, and equation parameters. Its WebGL controls include planar and true 3D views, fixed camera presets, accumulation, and frame-based marker colors.
+Oscillate Wildly supplies motion sources and small browser adapters for animating an existing Canvas 2D, WebGL, DOM, or SVG marker. The [interactive example](./examples) switches among all seven motions and all four render targets, with controls for framing, overflow, appearance, and equation parameters. Its WebGL controls include planar and true 3D views, camera presets, mouse and touch orbit controls, accumulation, and frame-based marker colors.
 
 ## Install
 
@@ -77,7 +77,23 @@ animateCanvas(canvas, createRoseMotion(), {
 });
 ```
 
-Canvas is clipped by its own drawing surface. For trails and analytic paths, opt in to `createCanvasTrail` from `oscillate-wildly/canvas/trail` and `createCanvasPath` from `oscillate-wildly/canvas/path`, then call their returned renderers from your `render` function.
+Canvas is clipped by its own drawing surface. For trails and analytic paths, opt in to `createCanvasTrail` from `oscillate-wildly/canvas/trail` and `createCanvasPath` from `oscillate-wildly/canvas/path`, then call their returned renderers from your `render` function. Trails default to `maxSamples: 128`; set a positive safe integer to retain that many positions. `maxSamples: 1` produces no line.
+
+```ts
+import { createCanvasTrail } from "oscillate-wildly/canvas/trail";
+import { animateCanvas, renderCanvasMarker } from "oscillate-wildly/canvas";
+
+const trail = createCanvasTrail({ maxSamples: 128, color: "#7dd3fc", width: 2 });
+const controller = animateCanvas(canvas, createRoseMotion(), {
+  render(context, frame) {
+    trail(context, frame);
+    renderCanvasMarker(context, frame, { color: "#7dd3fc", radius: 6 });
+  },
+});
+
+trail.clear(); // discard history; the next render clears the old drawing
+// controller.reset() restarts motion and clears the trail.
+```
 
 ### WebGL
 
@@ -126,7 +142,7 @@ const spatial = animateWebGL(
       bounds: { minX: -2, maxX: 2, minY: -2, maxY: 2 },
     },
     framing: { fit: "contain", padding: 10 },
-    accumulate: true,
+    trail: { maxSamples: 128, width: 2 },
     marker: { radius: 5, color: [0.3, 0.8, 1], shape: "circle" },
   },
 );
@@ -137,7 +153,8 @@ Projection is independent of WebGL. `projectOrthographic(pose, viewport, camera,
 | WebGL option                       | Behavior                                                                                                                                                                                    |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `marker`                           | Object or `(frame) => options \| null`. Defaults to a red circle, radius `5` CSS pixels; `null` skips the current marker. `shape` may be `'circle'` or `'square'`.                          |
-| `accumulate`                       | Defaults to `false`, clearing before each frame. `true` retains both color and hardware depth and adds markers incrementally.                                                               |
+| `accumulate`                       | Defaults to `false`, clearing before each frame. `true` retains both color and hardware depth and adds markers incrementally. Mutually exclusive with an enabled `trail`.                    |
+| `trail`                            | Disabled by default. `true` or `{ maxSamples?, width?, color? }` enables a bounded opaque tail. Defaults: `128` samples, `1` CSS-pixel width, and the current marker color (red when the marker is skipped).        |
 | `camera`                           | Optional fixed orthographic view; omit for planar motion.                                                                                                                                   |
 | `position`                         | Optional `(frame) => { x, y, z }` mapping from the model. Defaults to the motion's pose; absent Z is zero in camera mode.                                                                   |
 | `visibilityDepth`                  | Planar number or `(frame) => number`, default `0.5`; near is `0`, far is `1`, and values outside the interval are clipped. Camera mode derives depth from position and ignores this option. |
@@ -145,11 +162,13 @@ Projection is independent of WebGL. `projectOrthographic(pose, viewport, camera,
 
 Appearance callbacks receive a `WebGLFrame`: its `pose` contains the selected coordinates, its `position` includes `visibilityDepth`, and `project(pose)` uses the same current projection. **`pose.depth` remains a marker-radius multiplier**, independently of visibility depth. WebGL markers are opaque, camera-facing flat discs or squares; `pose.opacity` is intentionally ignored. Blending is disabled, and hardware depth testing lets nearer markers occlude farther ones in either drawing order, including across accumulated frames. At equal depth, the latest marker wins.
 
-The `WebGLController` supports normal lifecycle methods plus `clear()` and `setCamera(camera | undefined)`. `clear()` immediately presents an empty transparent drawing without drawing a marker or resetting motion; the next animation frame adds its marker. `reset()` clears accumulation, restarts motion, and draws its initial marker. `setCamera(undefined)` returns to planar projection. Camera/framing updates, CSS viewport changes, and bitmap changes clear accumulated output and redraw the current marker, including while paused. Bitmap attributes are observed independently of CSS resize notifications. A zero-size target suspends animation until it becomes drawable again.
+A trail retains at most `maxSamples` world-space XYZ positions and reprojects them in the current view on each redraw. `maxSamples` must be a positive safe integer and defaults to `128`; `1` leaves only the current marker with no line. `width` is a non-negative finite CSS-pixel stroke width; `0` suppresses the line. Set an explicit opaque RGB `color` to keep the whole tail one color, or omit it to follow the current marker color, including appearance callbacks. The tail is drawn together with the current marker using hardware depth testing. Enabling both `trail` and `accumulate` throws a `TypeError`.
 
-GPU programs, a quad buffer, color texture, depth renderbuffer, and framebuffer are reused for a fixed view. Resize reallocates attachment storage without retaining CPU path history. Context loss suspends motion time; restoration rebuilds resources, clears accumulated output, and redraws the current motion. Manual pause/resume choices, document visibility, offscreen state, and reduced-motion preferences remain in effect. `dispose()` removes observers/listeners and deletes live GPU resources. The adapter owns its canvas's GL context; interleaving another renderer on it is unsupported. WebGL, like Canvas 2D, pauses offscreen by default.
+The `WebGLController` supports normal lifecycle methods plus `clear()` and `setCamera(camera | undefined)`. `clear()` discards trail history and accumulated drawing, immediately presenting an empty transparent drawing without drawing a marker or resetting motion; the next animation frame adds its marker. `reset()` discards history and accumulation, restarts motion, and draws its initial marker. `setCamera(undefined)` returns to planar projection. Camera/framing updates, CSS viewport changes, and bitmap changes reproject retained trail history, while clearing accumulated output; they redraw the current marker, including while paused. Paused redraws do not add trail samples. If an application changes its `position` mapping, call `clear()` to discard positions from the old coordinate system. Bitmap attributes are observed independently of CSS resize notifications. A zero-size target suspends animation until it becomes drawable again.
 
-This release supports fixed-view opaque accumulation only. It does not provide perspective, interactive camera controls, retained-path reprojection, translucent accumulation, or anti-aliased marker edges. Projection does not auto-fit a 3D trajectory: choose camera bounds and clipping distances for your motion. Accumulation is clipped by the canvas and is lost on view changes or context loss.
+GPU programs, buffers, color texture, depth renderbuffer, and framebuffer are reused. Resize reallocates attachment storage; trail history stays bounded in CPU memory and is reprojected. Context loss suspends motion time; restoration rebuilds resources, reprojects retained trail history, clears accumulated output, and redraws the current motion. Manual pause/resume choices, document visibility, offscreen state, and reduced-motion preferences remain in effect. `dispose()` removes observers/listeners and deletes live GPU resources. The adapter owns its canvas's GL context; interleaving another renderer on it is unsupported. WebGL, like Canvas 2D, pauses offscreen by default.
+
+WebGL supports bounded opaque trails and fixed-view opaque accumulation. It does not provide perspective projection, translucent drawing, or anti-aliased marker edges. Camera interaction belongs to the application; the playground supplies mouse, touch, and keyboard orbit controls through `setCamera`. Projection does not auto-fit a 3D trajectory: choose camera bounds and clipping distances for your motion. Both modes are clipped by the canvas. Accumulation is lost on view changes or context loss; trail history is retained and reprojected.
 
 ### DOM
 
@@ -196,7 +215,28 @@ animateSvg(
 );
 ```
 
-Set SVG clipping in your own markup or CSS, for example `overflow: hidden` on the SVG. Optional helpers are `createSvgTrail` from `oscillate-wildly/svg/trail` and `createSvgStaticPath` (or `renderSvgStaticPath`) from `oscillate-wildly/svg/path`. Both operate on a path element you create and restore its original `d` value when disposed.
+Set SVG clipping in your own markup or CSS, for example `overflow: hidden` on the SVG. Optional helpers are `createSvgTrail` from `oscillate-wildly/svg/trail` and `createSvgStaticPath` (or `renderSvgStaticPath`) from `oscillate-wildly/svg/path`. Both operate on a path element you create and restore its original `d` value when disposed. SVG trails default to `maxSamples: 128`; choose a positive safe integer to set the retained sample count:
+
+```ts
+import { createSvgTrail } from "oscillate-wildly/svg/trail";
+import { animateSvg, renderSvgMarker } from "oscillate-wildly/svg";
+
+trailPath.style.stroke = "#7dd3fc";
+trailPath.style.strokeWidth = "2px";
+const trail = createSvgTrail({ viewport, path: trailPath, maxSamples: 128 });
+const controller = animateSvg({ viewport, marker }, createHelixMotion(), {
+  render(frame, targets) {
+    trail.render(frame);
+    renderSvgMarker(frame, targets);
+  },
+});
+
+trail.clear(); // erase the trail without resetting motion
+// controller.reset() restarts motion and clears the trail.
+// trail.dispose() restores the path's original d attribute.
+```
+
+Canvas, SVG, and WebGL trails retain model-space positions and reproject existing history on framing or viewport changes and paused redraws without adding samples. Repeated renders at the same motion time do not extend the trail; reset clears history and restarts motion. `clear()` discards history without resetting motion. `maxSamples: 1` retains one position and produces no line. Invalid limits (zero, negatives, fractions, unsafe integers, `NaN`, or infinities) throw a `RangeError`. DOM has no trail helper.
 
 ## Framing
 
@@ -256,9 +296,11 @@ pnpm test:browser              # builds the library and demo, then runs Chrome s
 ```
 
 The example source is in [`examples/`](./examples). It is the integration reference for mounting and replacing controllers.
-Choose **WebGL** for any planar motion, or choose **Lissajous**, **Helix**, **Lorenz**, or **Duffing**, then **3D coordinates** with a fixed front or oblique orthographic camera. Lissajous has a **Z cycles** parameter. Duffing's view displays forcing phase around a cylinder: `radius = 1.2 + 0.8 * tanh(displacement / 3)`, height is `velocity / 3`, and the circular X/Z coordinates are `radius * cos(phase)` and `radius * sin(phase)`. This is a continuous phase-space visualization rather than physical XYZ motion; the positive, bounded radius maps displacement monotonically and avoids a discontinuity at phase multiples of `2π`. The display mapping is computed only when the 3D view is selected.
+Choose **WebGL** for any planar motion, or choose **Lissajous**, **Helix**, **Lorenz**, or **Duffing**, then **3D coordinates** with a front or oblique orthographic camera. Drag the canvas with the primary mouse button or one finger to orbit around the motion, or focus the canvas and use the arrow keys. Dragging continues outside the canvas until release or cancellation. The camera stays at the same distance and stops short of the poles. **Camera preset** shows **Dragged view** after rotation; choosing **Front** or **Oblique** restores that preset without restarting motion. Planar views retain normal touch scrolling. Orbiting preserves motion time and manual pause, reprojects retained trail geometry, and clears accumulated drawing. The projection remains orthographic.
+
+Lissajous has a **Z cycles** parameter. Duffing's view displays forcing phase around a cylinder: `radius = 1.2 + 0.8 * tanh(displacement / 3)`, height is `velocity / 3`, and the circular X/Z coordinates are `radius * cos(phase)` and `radius * sin(phase)`. This is a continuous phase-space visualization rather than physical XYZ motion; the positive, bounded radius maps displacement monotonically and avoids a discontinuity at phase multiples of `2π`. The display mapping is computed only when the 3D view is selected.
 
 Every renderer consumes the motion factory's `pose.depth` as a marker-size scale. Lissajous and Duffing use a `0.25` to `1` size range, as with the helix cue; Lorenz and ellipse also supply their size cues in the pose. The playground uses the same factory output for Canvas 2D, DOM, SVG, and WebGL, including WebGL 3D views. This cue is independent of camera clipping depth, and planar WebGL still has equal visibility depth for its markers.
 
-Enable **Accumulate drawing**, then compare **Clear drawing** (keeps motion time) with **Reset** (restarts the motion). **Animate with time** and **Shade by view depth** demonstrate appearance computed from the current frame. The readout separates marker-size scale from visibility depth. Appearance, coordinate-view, and camera changes preserve motion time and manual pause while clearing the drawing; changing accumulation, equation parameters, motion, or renderer remounts the animation and restarts its time while preserving manual pause. **Restore playground defaults** starts the default Canvas 2D animation again.
+Enable **Show trail** on Canvas 2D, SVG, or WebGL. **Tail length (samples)** defaults to `128` and keeps the latest positive safe integer number of positions; `1` produces no line. This control requires an enabled trail and is disabled for DOM. For WebGL, **Show trail** retains connected geometry that follows the current view; **Accumulate drawing** retains markers in a fixed view. Checking either unchecks the other. Switching to WebGL with both controls checked selects the trail. Compare **Clear drawing** (discards history and keeps motion time) with **Reset** (discards history and restarts the motion). **Animate with time** and **Shade by view depth** demonstrate appearance computed from the current frame; the whole WebGL trail follows that current color. The readout separates marker-size scale from visibility depth. Appearance, coordinate-view, and camera changes preserve motion time and manual pause. Camera, framing, and appearance changes reproject retained trail history while clearing accumulation; coordinate-view changes discard trail history because they change the position mapping. Changing trail visibility, tail length, accumulation, equation parameters, motion, or renderer remounts the animation and restarts its time while preserving manual pause. Invalid tail lengths show a status message and keep the current animation running. **Restore playground defaults** resets tail length to `128` and starts the default Canvas 2D animation again.
 If Chromium is not installed through Playwright, set `CHROME_PATH` to an installed Chrome or Chromium executable when running `pnpm test:browser`.

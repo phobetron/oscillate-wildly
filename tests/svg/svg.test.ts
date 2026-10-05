@@ -45,9 +45,9 @@ const elements = () => {
   return { viewport, marker, path };
 };
 
-const frame = (x: number, y: number): Frame<undefined> => ({
+const frame = (x: number, y: number, elapsedSeconds = x): Frame<undefined> => ({
   state: undefined, pose: { x, y }, position: { x, y, scaleX: 1, scaleY: 1 },
-  viewport: { width: 200, height: 100 }, elapsedSeconds: 0,
+  viewport: { width: 200, height: 100 }, elapsedSeconds,
   project: (pose) => ({ ...pose, scaleX: 1, scaleY: 1 }),
 });
 
@@ -141,6 +141,33 @@ describe('animateSvg', () => {
 });
 
 describe('SVG helpers', () => {
+  test('reprojects paused history without eviction and snapshots mutable poses', () => {
+    const { viewport, path } = elements();
+    const trail = createSvgTrail<undefined>({ viewport, path, maxSamples: 2 });
+    const pose = { x: 1, y: 1 };
+    trail.render(worldFrame(pose, 1));
+    pose.x = 2;
+    pose.y = 2;
+    trail.render(worldFrame(pose, 2));
+    const paused = worldFrame({ x: 3, y: 3 }, 2, 2);
+    trail.render(paused);
+    trail.render(paused);
+    expect(path.getAttribute('d')).toBe('M 1 1 L 3 3');
+    trail.clear();
+    expect(path.getAttribute('d')).toBe('');
+    trail.render(paused);
+    expect(path.getAttribute('d')).toBe('M 3 3');
+    trail.dispose();
+    expect(path.getAttribute('d')).toBe('M 0 0');
+  });
+
+  test('rejects invalid trail capacities', () => {
+    const { viewport, path } = elements();
+    for (const maxSamples of [Infinity, -Infinity, NaN, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => createSvgTrail({ viewport, path, maxSamples })).toThrow(RangeError);
+    }
+  });
+
   test('maps none, meet, and slice preserveAspectRatio modes in local coordinates', () => {
     const { viewport } = elements();
     const localViewport = viewport as unknown as {

@@ -10,6 +10,12 @@ export interface WebGLMarkerOptions {
   readonly shape?: 'circle' | 'square';
 }
 
+export interface WebGLTrailStyle {
+  /** Full width in CSS pixels, independent of marker scale. Defaults to 1. */
+  readonly width?: number;
+  readonly color?: WebGLColor;
+}
+
 const vertex = `
 attribute vec2 corner;
 uniform vec3 center;
@@ -43,6 +49,17 @@ precision mediump float;
 uniform sampler2D image;
 varying vec2 uv;
 void main() { gl_FragColor = texture2D(image, uv); }
+`;
+
+const trailVertex = `
+attribute vec3 corner;
+void main() { gl_Position = vec4(corner, 1.0); }
+`;
+
+const trailFragment = `
+precision mediump float;
+uniform vec3 color;
+void main() { gl_FragColor = vec4(color, 1.0); }
 `;
 
 const required = <T>(value: T | null, name: string): T => {
@@ -95,6 +112,11 @@ const program = (gl: WebGLRenderingContext, vertexSource: string, fragmentSource
 export const createMarkerRenderer = (gl: WebGLRenderingContext) => {
   let markerProgram: WebGLProgram | undefined;
   let copyProgram: WebGLProgram | undefined;
+  let trailProgram: WebGLProgram | undefined;
+  let trailBuffer: WebGLBuffer | undefined;
+  let trailColor!: WebGLUniformLocation;
+  let trailVertices = new Float32Array(0);
+  let trailBufferCapacity = 0;
   let buffer: WebGLBuffer | undefined;
   let texture: WebGLTexture | undefined;
   let depth: WebGLRenderbuffer | undefined;
@@ -116,11 +138,16 @@ export const createMarkerRenderer = (gl: WebGLRenderingContext) => {
     gl.bindRenderbuffer(gl.RENDERBUFFER, null);
     if (markerProgram) gl.deleteProgram(markerProgram);
     if (copyProgram) gl.deleteProgram(copyProgram);
+    if (trailProgram) gl.deleteProgram(trailProgram);
+    if (trailBuffer) gl.deleteBuffer(trailBuffer);
     if (buffer) gl.deleteBuffer(buffer);
     if (texture) gl.deleteTexture(texture);
     if (depth) gl.deleteRenderbuffer(depth);
     if (target) gl.deleteFramebuffer(target);
     markerProgram = copyProgram = buffer = texture = depth = target = undefined;
+    trailProgram = trailBuffer = undefined;
+    trailVertices = new Float32Array(0);
+    trailBufferCapacity = 0;
   };
 
   try {
@@ -192,6 +219,85 @@ export const createMarkerRenderer = (gl: WebGLRenderingContext) => {
       return true;
     },
     clear,
+    drawTrail(positions: readonly (ProjectedPose & { readonly visibilityDepth: number })[], viewport: Viewport, options: WebGLTrailStyle): void {
+      const trailWidth = options.width ?? 1;
+      const rgb = options.color ?? [1, 0, 0];
+      if (!Number.isFinite(trailWidth) || trailWidth < 0) {
+        throw new RangeError('WebGL trail width must be finite and non-negative');
+      }
+      if (rgb.length !== 3 || !rgb.every((value) => Number.isFinite(value) && value >= 0 && value <= 1)) {
+        throw new RangeError('WebGL trail color must contain three RGB channels in [0, 1]');
+      }
+      let segments = 0;
+      for (let index = 0; index < positions.length; index++) {
+        const position = positions[index];
+        if (![position.x, position.y, position.visibilityDepth].every(Number.isFinite)) {
+          throw new RangeError('WebGL trail position and visibility depth must be finite');
+        }
+        const previous = positions[index - 1];
+        if (previous && (previous.x !== position.x || previous.y !== position.y)) segments++;
+      }
+      if (trailWidth === 0 || segments === 0) return;
+
+      // Allocate only when a trail has visible geometry to submit. Existing
+      // marker-only users keep exactly the same GPU resource footprint.
+      if (!trailProgram) {
+        try {
+          trailProgram = program(gl, trailVertex, trailFragment);
+          trailBuffer = required(gl.createBuffer(), 'trail buffer');
+          trailColor = required(gl.getUniformLocation(trailProgram, 'color'), 'trail color uniform');
+        } catch (error) {
+          if (trailProgram) gl.deleteProgram(trailProgram);
+          if (trailBuffer) gl.deleteBuffer(trailBuffer);
+          trailProgram = trailBuffer = undefined;
+          throw error;
+        }
+      }
+      const floats = segments * 18;
+      if (trailVertices.length < floats) {
+        trailVertices = new Float32Array(Math.max(floats, trailVertices.length * 2));
+      }
+      let offset = 0;
+      const append = (x: number, y: number, visibilityDepth: number): void => {
+        trailVertices[offset++] = x * 2 / viewport.width - 1;
+        trailVertices[offset++] = 1 - y * 2 / viewport.height;
+        trailVertices[offset++] = visibilityDepth * 2 - 1;
+      };
+      for (let index = 1; index < positions.length; index++) {
+        const a = positions[index - 1];
+        const b = positions[index];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const length = Math.hypot(dx, dy);
+        if (length === 0) continue;
+        const nx = -dy / length * trailWidth / 2;
+        const ny = dx / length * trailWidth / 2;
+        // Segment quads avoid implementation-dependent GL line width limits.
+        // Keep each endpoint's depth so hardware clips and interpolates it,
+        // including segments crossing either camera plane or viewport edge.
+        append(a.x + nx, a.y + ny, a.visibilityDepth);
+        append(a.x - nx, a.y - ny, a.visibilityDepth);
+        append(b.x + nx, b.y + ny, b.visibilityDepth);
+        append(b.x + nx, b.y + ny, b.visibilityDepth);
+        append(a.x - nx, a.y - ny, a.visibilityDepth);
+        append(b.x - nx, b.y - ny, b.visibilityDepth);
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target!);
+      bindQuad();
+      gl.bindBuffer(gl.ARRAY_BUFFER, trailBuffer!);
+      if (trailBufferCapacity < trailVertices.length) {
+        gl.bufferData(gl.ARRAY_BUFFER, trailVertices.byteLength, gl.DYNAMIC_DRAW);
+        trailBufferCapacity = trailVertices.length;
+      }
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, trailVertices.subarray(0, offset));
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthMask(true);
+      gl.depthFunc(gl.LEQUAL);
+      gl.useProgram(trailProgram);
+      gl.uniform3f(trailColor, rgb[0], rgb[1], rgb[2]);
+      gl.drawArrays(gl.TRIANGLES, 0, offset / 3);
+    },
     draw(position: ProjectedPose, visibilityDepth: number, viewport: Viewport, options: WebGLMarkerOptions): void {
       const markerRadius = options.radius ?? 5;
       const depthScale = position.depth ?? 1;
