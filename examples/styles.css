@@ -20,6 +20,7 @@ label { display: grid; gap: .35rem; color: #cbd5e1; font-size: .9rem; }
 select, button, input { accent-color: #67e8f9; }
 select, button { min-height: 2.3rem; border: 1px solid #475569; border-radius: .35rem; background: #17213d; color: inherit; padding: .3rem .55rem; }
 button { cursor: pointer; }
+button:disabled, select:disabled, input:disabled { opacity: .5; cursor: default; }
 output { color: #67e8f9; }
 .button-row { display: flex; gap: .5rem; }
 .stage-shell { aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid #334155; border-radius: 1rem; background: #10172e; }
@@ -34,4 +35,5 @@ output { color: #67e8f9; }
 #svg-full-path { stroke: #67e8f955; }
 #svg-trail { stroke: #67e8f999; }
 .status { min-height: 1.5rem; color: #94a3b8; }
+.frame-readout { color: #94a3b8; font-size: .85rem; font-variant-numeric: tabular-nums; }
 @media (max-width: 640px) { .page { padding-top: 1.5rem; } .controls { align-items: stretch; } }

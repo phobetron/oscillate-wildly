@@ -10,7 +10,7 @@
       <header>
         <p class="eyebrow">Oscillate Wildly</p>
         <h1>Oscillators, curves, and attractors</h1>
-        <p class="intro">Explore parametric curves, the Van der Pol and Duffing oscillators, and the Lorenz attractor. Adjust their parameters, framing, and renderer.</p>
+        <p class="intro">Explore parametric curves, oscillators, and attractors across four renderers. Use WebGL for 3D Lissajous, helix, and Lorenz motion or Duffing phase space, and accumulate opaque markers with depth testing.</p>
       </header>
       <section class="controls" aria-label="Animation controls">
         <label>Motion
@@ -19,7 +19,7 @@
           </select>
         </label>
         <label>Renderer
-          <select id="renderer"><option value="canvas">Canvas</option><option value="dom">DOM</option><option value="svg">SVG</option></select>
+          <select id="renderer"><option value="canvas">Canvas 2D</option><option value="webgl">WebGL</option><option value="dom">DOM</option><option value="svg">SVG</option></select>
         </label>
         <label>Fit
           <select id="fit"><option value="cover">Cover</option><option value="contain">Contain</option><option value="stretch">Stretch</option></select>
@@ -53,12 +53,32 @@
           <p id="visual-note" class="control-note">Trails and full paths are available for Canvas and SVG; full paths require a periodic motion.</p>
         </fieldset>
         <fieldset>
+          <legend>WebGL view and drawing</legend>
+          <div class="field-grid">
+            <label>Coordinates
+              <select id="webgl-view" aria-describedby="webgl-note"><option value="planar">Planar</option><option value="spatial">3D coordinates</option></select>
+            </label>
+            <label>Fixed camera
+              <select id="webgl-camera"><option value="oblique">Oblique</option><option value="front">Front</option></select>
+            </label>
+            <label>Marker shape
+              <select id="webgl-shape"><option value="circle">Circle</option><option value="square">Square</option></select>
+            </label>
+            <label>Marker color
+              <select id="webgl-color-mode"><option value="solid">Selected color</option><option value="time">Animate with time</option><option value="depth">Shade by view depth</option></select>
+            </label>
+            <label class="check-label"><input id="webgl-accumulate" type="checkbox" /> Accumulate drawing</label>
+            <button id="clear-drawing" type="button">Clear drawing</button>
+          </div>
+          <p id="webgl-note" class="control-note">Choose WebGL for 3D Lissajous, Helix, Lorenz, or Duffing phase space.</p>
+        </fieldset>
+        <fieldset>
           <legend>Equation</legend>
           <div id="parameter-controls" class="field-grid"></div>
         </fieldset>
         <fieldset>
           <legend>Custom projected bounds</legend>
-          <label class="check-label"><input id="custom-bounds" type="checkbox" /> Override the motion’s calibrated bounds</label>
+          <label class="check-label"><input id="custom-bounds" type="checkbox" /> Override the current view’s bounds</label>
           <div id="bounds-controls" class="field-grid">
             <label>Min X <input id="min-x" type="number" step="any" /></label>
             <label>Max X <input id="max-x" type="number" step="any" /></label>
@@ -70,9 +90,15 @@
       </section>
       <section class="stage-shell" aria-label="Animation output">
         <canvas id="canvas-stage" class="stage" width="1280" height="720" aria-label="Canvas animation"></canvas>
+        <canvas id="webgl-stage" class="stage" width="1280" height="720" aria-label="WebGL animation" hidden></canvas>
         <div id="dom-stage" class="stage dom-stage" aria-label="DOM animation"><div id="dom-marker" class="dom-marker" aria-hidden="true"></div></div>
         <svg id="svg-stage" class="stage svg-stage" viewBox="0 0 1280 720" role="img" aria-label="SVG animation"><path id="svg-full-path" /><path id="svg-trail" /><g id="svg-marker"><circle r="13"></circle></g></svg>
       </section>
+      <p id="webgl-frame" class="frame-readout" hidden>
+        Elapsed <output id="webgl-time">0.000</output> s ·
+        Marker-size scale <output id="webgl-size-scale">1.00</output> ·
+        Visibility depth <output id="webgl-depth">0.500</output> (near 0, far 1)
+      </p>
       <p id="status" class="status" aria-live="polite"></p>
     </main>
   </body>

@@ -36,6 +36,8 @@ export interface CreateControllerOptions<State> {
   readonly platform?: RuntimePlatform;
   readonly onReset?: () => void;
   readonly onDispose?: () => void;
+  /** Suspend scheduling while the renderer is unavailable, independently of user preferences. */
+  readonly observeAvailability?: (callback: (available: boolean) => void) => () => void;
 }
 
 /** Short form retained for adapter-facing controller configuration. */
@@ -123,10 +125,12 @@ const interpolate = (from: Pose, to: Pose, amount: number): Pose => {
   const channel = (a: number | undefined, b: number | undefined): number | undefined =>
     a === undefined || b === undefined ? (b ?? a) : a + (b - a) * amount;
   const depth = channel(from.depth, to.depth);
+  const z = channel(from.z, to.z);
   const opacity = channel(from.opacity, to.opacity);
   return {
     x: from.x + (to.x - from.x) * amount,
     y: from.y + (to.y - from.y) * amount,
+    ...(z === undefined ? {} : { z }),
     ...(depth === undefined ? {} : { depth }),
     ...(opacity === undefined ? {} : { opacity }),
   };
@@ -154,6 +158,7 @@ export const createController = <State>(options: CreateControllerOptions<State>)
   let documentVisible = platform.isDocumentVisible?.() ?? true;
   let intersecting = true;
   let reducedMotion = platform.prefersReducedMotion?.() ?? false;
+  let available = true;
   let hasViewport = false;
   let lastTimestamp: number | undefined;
   let elapsedSeconds = 0;
@@ -164,8 +169,9 @@ export const createController = <State>(options: CreateControllerOptions<State>)
   let stopForResize = (): void => undefined;
   let stopForIntersection = (): void => undefined;
   let stopForReducedMotion = (): void => undefined;
+  let stopForAvailability = (): void => undefined;
 
-  const running = (): boolean => !disposed && hasViewport && !manuallyPaused && documentVisible && (!offscreen || intersecting) && !reducedMotion;
+  const running = (): boolean => !disposed && available && hasViewport && !manuallyPaused && documentVisible && (!offscreen || intersecting) && !reducedMotion;
 
   const frameFor = (sample: MotionSample<State>, pose: Pose, viewport: Viewport): Frame<State> => {
     const project = (worldPose: Pose): ProjectedPose => projectToCssPixels(worldPose, viewport, framing, source.bounds);
@@ -198,6 +204,7 @@ export const createController = <State>(options: CreateControllerOptions<State>)
     stopForResize();
     stopForIntersection();
     stopForReducedMotion();
+    stopForAvailability();
     targets.delete(options.target);
     if (source.kind === 'stateful') statefulSources.delete(source);
   };
@@ -280,6 +287,18 @@ export const createController = <State>(options: CreateControllerOptions<State>)
       lastTimestamp = undefined;
       if (reduced) removeFromScheduler(); else addToScheduler();
     }) ?? (() => undefined);
+    stopForAvailability = options.observeAvailability?.((nextAvailable) => {
+      if (disposed) return;
+      // An available renderer may request another still-frame redraw (for
+      // example a bitmap resize). Only a real suspension resets motion time.
+      if (nextAvailable !== available || !hasViewport) lastTimestamp = undefined;
+      available = nextAvailable;
+      if (available) {
+        if (render()) addToScheduler(); else removeFromScheduler();
+      } else {
+        removeFromScheduler();
+      }
+    }) ?? (() => undefined);
 
     // Every controller exposes a deterministic still frame before autoplay begins.
     render();
@@ -327,6 +346,6 @@ export const createController = <State>(options: CreateControllerOptions<State>)
     dispose() {
       disposeController();
     },
-    isPaused: () => manuallyPaused || !hasViewport || !documentVisible || (offscreen && !intersecting) || reducedMotion,
+    isPaused: () => !available || manuallyPaused || !hasViewport || !documentVisible || (offscreen && !intersecting) || reducedMotion,
   };
 };

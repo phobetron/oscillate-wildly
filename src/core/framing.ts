@@ -48,6 +48,7 @@ export const projectToCssPixels = (
   return {
     x: (pose.x - (bounds.minX + bounds.maxX) / 2) * scaleX + width / 2 + offsetX,
     y: (pose.y - (bounds.minY + bounds.maxY) / 2) * scaleY + height / 2 + offsetY,
+    ...(pose.z === undefined ? {} : { z: pose.z }),
     ...(pose.depth === undefined ? {} : { depth: pose.depth }),
     ...(pose.opacity === undefined ? {} : { opacity: pose.opacity }),
     scaleX,

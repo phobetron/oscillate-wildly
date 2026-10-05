@@ -11,6 +11,8 @@ export interface DuffingParams extends NumericalOptions {
 
 export interface DuffingState {
   readonly timeSeconds: number;
+  /** Unwrapped forcing angle at the current model time, in radians. */
+  readonly forcingPhaseRadians: number;
   readonly x: number;
   readonly y: number;
 }
@@ -28,7 +30,11 @@ export const createDuffingMotion = (params: DuffingParams = {}): StatefulMotionS
     bounds,
     initialState: [initialX, initialY] as const,
     derivative: ([x, y], timeSeconds) => [y, x - x ** 3 - damping * y + forcing * Math.cos(angularFrequency * timeSeconds)] as const,
-    snapshot: ([x, y], timeSeconds) => ({ state: { timeSeconds, x, y }, pose: { x: x / 3, y: y / 3 } }),
+    snapshot: ([x, y], timeSeconds) => {
+      const forcingPhaseRadians = angularFrequency * timeSeconds;
+      // Use forcing phase as a bounded marker-size cue in the planar pose.
+      return { state: { timeSeconds, forcingPhaseRadians, x, y }, pose: { x: x / 3, y: y / 3, depth: 0.625 + 0.375 * Math.sin(forcingPhaseRadians) } };
+    },
     timeScale: params.timeScale ?? 2.4,
     runawayLimit: params.runawayLimit,
   });

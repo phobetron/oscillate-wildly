@@ -1,6 +1,6 @@
 {
   "name": "oscillate-wildly",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Animated oscillators, parametric curves, and attractors for the web.",
   "type": "module",
   "license": "MIT",
@@ -61,6 +61,10 @@
     "./canvas": {
       "types": "./dist/canvas/index.d.ts",
       "import": "./dist/canvas/index.js"
+    },
+    "./webgl": {
+      "types": "./dist/webgl/index.d.ts",
+      "import": "./dist/webgl/index.js"
     },
     "./dom": {
       "types": "./dist/dom/index.d.ts",

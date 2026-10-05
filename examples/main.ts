@@ -7,9 +7,12 @@ import {
   createRoseMotion,
   createVanderPolMotion,
   type Bounds,
+  type DuffingState,
   type FrameFit,
   type Framing,
   type MotionSource,
+  type OrthographicCamera,
+  type Point3D,
 } from '../src';
 import { animateCanvas, renderCanvasMarker } from '../src/canvas';
 import { createCanvasPath } from '../src/canvas/path';
@@ -19,11 +22,12 @@ import { animateSvg, renderSvgMarker } from '../src/svg';
 import { createSvgStaticPath, type SvgStaticPath } from '../src/svg/path';
 import { createSvgTrail } from '../src/svg/trail';
 import type { Controller } from '../src/runtime';
+import { animateWebGL, type WebGLColor, type WebGLController } from '../src/webgl';
 
 import './styles.css';
 
 type MotionName = 'ellipse' | 'rose' | 'lissajous' | 'helix' | 'vander-pol' | 'duffing' | 'lorenz';
-type RendererName = 'canvas' | 'dom' | 'svg';
+type RendererName = 'canvas' | 'webgl' | 'dom' | 'svg';
 type Parameter = { key: string; label: string; value: number; step?: number; min?: number; max?: number };
 
 const parameterDefinitions: Record<MotionName, readonly Parameter[]> = {
@@ -37,6 +41,7 @@ const parameterDefinitions: Record<MotionName, readonly Parameter[]> = {
     { key: 'periodSeconds', label: 'Period (seconds)', value: 60, min: 1, step: 1 },
     { key: 'cyclesX', label: 'Horizontal cycles', value: 5, min: 1, max: 20, step: 1 },
     { key: 'cyclesY', label: 'Vertical cycles', value: 4, min: 1, max: 20, step: 1 },
+    { key: 'cyclesZ', label: 'Z cycles', value: 3, min: 1, max: 20, step: 1 },
   ],
   helix: [
     { key: 'periodSeconds', label: 'Period (seconds)', value: 12, min: 1, step: 0.5 },
@@ -91,6 +96,17 @@ const sizeValue = required<HTMLOutputElement>('#marker-size-value');
 const trailInput = required<HTMLInputElement>('#show-trail');
 const pathInput = required<HTMLInputElement>('#show-path');
 const visualNote = required<HTMLElement>('#visual-note');
+const webglView = required<HTMLSelectElement>('#webgl-view');
+const webglCamera = required<HTMLSelectElement>('#webgl-camera');
+const webglShape = required<HTMLSelectElement>('#webgl-shape');
+const webglColorMode = required<HTMLSelectElement>('#webgl-color-mode');
+const webglAccumulate = required<HTMLInputElement>('#webgl-accumulate');
+const clearDrawingButton = required<HTMLButtonElement>('#clear-drawing');
+const webglNote = required<HTMLElement>('#webgl-note');
+const webglReadout = required<HTMLElement>('#webgl-frame');
+const webglTime = required<HTMLOutputElement>('#webgl-time');
+const webglSizeScale = required<HTMLOutputElement>('#webgl-size-scale');
+const webglDepth = required<HTMLOutputElement>('#webgl-depth');
 const parameterControls = required<HTMLElement>('#parameter-controls');
 const customBounds = required<HTMLInputElement>('#custom-bounds');
 const boundsInputs = {
@@ -105,6 +121,7 @@ const defaultsButton = required<HTMLButtonElement>('#defaults');
 const status = required<HTMLElement>('#status');
 const shell = required<HTMLElement>('.stage-shell');
 const canvas = required<HTMLCanvasElement>('#canvas-stage');
+const webglCanvas = required<HTMLCanvasElement>('#webgl-stage');
 const domViewport = required<HTMLElement>('#dom-stage');
 const domMarker = required<HTMLElement>('#dom-marker');
 const svgViewport = required<SVGSVGElement>('#svg-stage');
@@ -128,7 +145,7 @@ const createMotion = (name: MotionName): MotionSource<unknown> => {
   switch (name) {
     case 'ellipse': return createEllipseMotion({ periodSeconds: p.periodSeconds, radiusX: p.radiusX, radiusY: p.radiusY });
     case 'rose': return createRoseMotion({ periodSeconds: p.periodSeconds });
-    case 'lissajous': return createLissajousMotion({ periodSeconds: p.periodSeconds, cyclesX: p.cyclesX, cyclesY: p.cyclesY });
+    case 'lissajous': return createLissajousMotion({ periodSeconds: p.periodSeconds, cyclesX: p.cyclesX, cyclesY: p.cyclesY, cyclesZ: p.cyclesZ });
     case 'helix': return createHelixMotion({ periodSeconds: p.periodSeconds, turns: p.turns, fadeFraction: p.fadeFraction });
     case 'vander-pol': return createVanderPolMotion({ mu: p.mu, timeScale: p.timeScale, initialX: p.initialX, initialY: p.initialY });
     case 'duffing': return createDuffingMotion({ damping: p.damping, forcing: p.forcing, angularFrequency: p.angularFrequency, timeScale: p.timeScale, initialX: p.initialX, initialY: p.initialY });
@@ -137,6 +154,9 @@ const createMotion = (name: MotionName): MotionSource<unknown> => {
 };
 
 let controller: Controller | undefined;
+let webglController: WebGLController | undefined;
+let manuallyPaused = false;
+let motionBounds: Bounds;
 let staticPath: SvgStaticPath | undefined;
 let clearTrail: (() => void) | undefined;
 let disposeTrail: (() => void) | undefined;
@@ -144,6 +164,7 @@ let disposeTrail: (() => void) | undefined;
 const disposeCurrent = (): void => {
   controller?.dispose();
   controller = undefined;
+  webglController = undefined;
   staticPath?.dispose();
   staticPath = undefined;
   disposeTrail?.();
@@ -160,14 +181,17 @@ const updateOutputs = (): void => {
 
 const activeStage = (renderer: RendererName): void => {
   canvas.hidden = renderer !== 'canvas';
+  webglCanvas.hidden = renderer !== 'webgl';
+  webglReadout.hidden = renderer !== 'webgl';
   domViewport.hidden = renderer !== 'dom';
   svgViewport.toggleAttribute('hidden', renderer !== 'svg');
-  const visibleOverflow = renderer !== 'canvas' && overflowSelect.value === 'visible';
+  const bitmap = renderer === 'canvas' || renderer === 'webgl';
+  const visibleOverflow = !bitmap && overflowSelect.value === 'visible';
   shell.style.overflow = visibleOverflow ? 'visible' : 'hidden';
   domViewport.style.overflow = visibleOverflow ? 'visible' : 'hidden';
   svgViewport.style.overflow = visibleOverflow ? 'visible' : 'hidden';
-  overflowSelect.disabled = renderer === 'canvas';
-  overflowNote.textContent = renderer === 'canvas'
+  overflowSelect.disabled = bitmap;
+  overflowNote.textContent = bitmap
     ? 'Canvas always clips drawing to its existing bitmap.'
     : 'Visible overflow paints outside the reserved box when surrounding CSS allows it.';
 };
@@ -202,13 +226,62 @@ const readFraming = (): Framing => {
 
 const updateAvailability = (motion: MotionSource<unknown>): void => {
   const dom = rendererSelect.value === 'dom';
-  trailInput.disabled = dom;
-  pathInput.disabled = dom || motion.kind !== 'analytic';
-  visualNote.textContent = dom
+  const webgl = rendererSelect.value === 'webgl';
+  const spatialMotion = ['helix', 'lorenz', 'lissajous', 'duffing'].includes(motionSelect.value);
+  if (!spatialMotion) webglView.value = 'planar';
+  webglView.querySelector<HTMLOptionElement>('option[value="spatial"]')!.disabled = !spatialMotion;
+  webglView.disabled = !webgl;
+  webglCamera.disabled = !webgl || webglView.value !== 'spatial';
+  for (const control of [webglShape, webglColorMode, webglAccumulate, clearDrawingButton]) control.disabled = !webgl;
+  webglNote.textContent = !webgl
+    ? 'Choose WebGL for 3D Lissajous, Helix, Lorenz, or Duffing phase space.'
+    : motionSelect.value === 'duffing'
+      ? 'Duffing phase space: radius shows displacement, height shows velocity, and angle shows forcing phase. Camera changes clear the drawing; clear keeps time, while reset restarts it.'
+      : 'Lissajous, Helix, and Lorenz offer XYZ motion. Camera and framing changes clear the drawing; clear keeps motion time, while reset restarts it. Markers are opaque.';
+  trailInput.disabled = dom || webgl;
+  pathInput.disabled = dom || webgl || motion.kind !== 'analytic';
+  visualNote.textContent = webgl
+    ? 'Use Accumulate drawing to add markers with hardware depth testing. All renderers use the motion’s hidden-coordinate size cue; marker-size scale and view depth are independent.'
+    : dom
     ? 'DOM moves your styled marker; Canvas and SVG provide the optional trail and full-path helpers.'
     : motion.kind === 'stateful'
       ? 'Trails are available. Full paths require a periodic motion.'
       : 'Trails and full paths are optional and use bounded or cached geometry.';
+};
+
+const spatialView = (): boolean => rendererSelect.value === 'webgl' && webglView.value === 'spatial';
+
+// These are application camera presets, independent of the rendering adapter.
+const cameraForView = (): OrthographicCamera | undefined => {
+  if (!spatialView()) return undefined;
+  const helix = motionSelect.value === 'helix';
+  const centerZ = helix ? valuesFor('helix').turns / 4 : 0;
+  const extent = helix ? Math.max(1.7, centerZ + 0.6) : 1.7;
+  // Duffing's angular state is displayed continuously around a cylinder;
+  // Lissajous uses conventional XYZ axes. Both views use positive Y as up.
+  if (motionSelect.value === 'duffing' || motionSelect.value === 'lissajous') {
+    const viewExtent = motionSelect.value === 'duffing' ? 2.1 : 1.7;
+    return {
+      position: webglCamera.value === 'front' ? { x: 0, y: 0, z: 7 } : { x: 5, y: 4, z: 5 },
+      target: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 },
+      near: 0.1, far: 14,
+      bounds: { minX: -viewExtent, maxX: viewExtent, minY: -viewExtent, maxY: viewExtent },
+    };
+  }
+  return {
+    position: webglCamera.value === 'front'
+      ? { x: 0, y: -7, z: centerZ }
+      : { x: 5, y: -5, z: centerZ + 4 },
+    target: { x: 0, y: 0, z: centerZ }, up: { x: 0, y: 0, z: 1 },
+    near: 0.1, far: 14,
+    bounds: { minX: -extent, maxX: extent, minY: -extent, maxY: extent },
+  };
+};
+
+const selectedColor = (): WebGLColor => {
+  const hex = colorInput.value.slice(1);
+  const channel = (offset: number) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255;
+  return [channel(0), channel(2), channel(4)];
 };
 
 const applyMarkerStyle = (): void => {
@@ -227,19 +300,24 @@ const applyMarkerStyle = (): void => {
 };
 
 const updateStatus = (): void => {
-  const overflow = rendererSelect.value === 'canvas' ? 'bitmap clipping' : `${overflowSelect.value} overflow`;
-  status.textContent = `${motionSelect.selectedOptions[0].text} on ${rendererSelect.selectedOptions[0].text}; ${fitSelect.value} at ${zoomInput.value}×, position ${offsetXValue.value}/${offsetYValue.value}, ${overflow}.`;
+  const bitmap = rendererSelect.value === 'canvas' || rendererSelect.value === 'webgl';
+  const overflow = bitmap ? 'bitmap clipping' : `${overflowSelect.value} overflow`;
+  const webgl = rendererSelect.value === 'webgl'
+    ? ` ${spatialView() ? `${motionSelect.value === 'duffing' ? '3D phase space' : 'True 3D'}, ${webglCamera.value} orthographic camera` : 'Planar coordinates'}; ${webglAccumulate.checked ? 'accumulating drawing' : 'current marker only'}.`
+    : '';
+  status.textContent = `${motionSelect.selectedOptions[0].text} on ${rendererSelect.selectedOptions[0].text}; ${fitSelect.value} at ${zoomInput.value}×, position ${offsetXValue.value}/${offsetYValue.value}, ${overflow}.${webgl}`;
 };
 
 const mount = (): void => {
   try {
     const motion = createMotion(motionSelect.value as MotionName);
-    setBoundsInputs(motion.bounds);
+    motionBounds = motion.bounds;
+    updateAvailability(motion);
+    setBoundsInputs(cameraForView()?.bounds ?? motion.bounds);
     const framing = readFraming();
     disposeCurrent();
     const renderer = rendererSelect.value as RendererName;
     activeStage(renderer);
-    updateAvailability(motion);
     applyMarkerStyle();
     const color = colorInput.value;
     const radius = Number(sizeInput.value);
@@ -251,7 +329,7 @@ const mount = (): void => {
         ? createCanvasPath(motion, { color: `${color}66`, width: 1 }) : undefined;
       clearTrail = trail?.clear;
       controller = animateCanvas(canvas, motion, {
-        framing,
+        framing, autoplay: !manuallyPaused,
         marker: { color, radius },
         ...(trail || path ? { render(context, frame) {
           path?.(context, frame);
@@ -259,8 +337,44 @@ const mount = (): void => {
           renderCanvasMarker(context, frame, { color, radius });
         } } : {}),
       });
+    } else if (renderer === 'webgl') {
+      webglController = animateWebGL(webglCanvas, motion, {
+        framing, autoplay: !manuallyPaused,
+        camera: cameraForView(), accumulate: webglAccumulate.checked,
+        position(frame): Point3D {
+          if (!spatialView()) return { x: frame.pose.x, y: frame.pose.y, z: frame.pose.z ?? 0 };
+          if (motionSelect.value === 'duffing') {
+            const { x, y, forcingPhaseRadians } = frame.state as DuffingState;
+            // A positive, bounded radius avoids folding displacement through
+            // the cylinder axis; circular phase has no wrap discontinuity.
+            const radius = 1.2 + 0.8 * Math.tanh(x / 3);
+            return { x: radius * Math.cos(forcingPhaseRadians), y: y / 3, z: radius * Math.sin(forcingPhaseRadians) };
+          }
+          // Lissajous, Helix, and Lorenz preserve XYZ coordinates in state.
+          const { x, y, z } = frame.state as Point3D;
+          return motionSelect.value === 'lorenz'
+            ? { x: x / 25, y: y / 25, z: (z - 27.5) / 25 }
+            : { x, y, z };
+        },
+        marker(frame) {
+          webglTime.value = frame.elapsedSeconds.toFixed(3);
+          webglSizeScale.value = (frame.pose.depth ?? 1).toFixed(2);
+          webglDepth.value = frame.position.visibilityDepth.toFixed(3);
+          const brightness = webglColorMode.value === 'time'
+            ? 0.35 + 0.65 * (Math.sin(frame.elapsedSeconds * 2) + 1) / 2
+            : webglColorMode.value === 'depth'
+              ? 1 - 0.65 * Math.max(0, Math.min(1, frame.position.visibilityDepth))
+              : 1;
+          const [r, g, b] = selectedColor();
+          return {
+            radius: Number(sizeInput.value), color: [r * brightness, g * brightness, b * brightness],
+            shape: webglShape.value === 'square' ? 'square' : 'circle',
+          };
+        },
+      });
+      controller = webglController;
     } else if (renderer === 'dom') {
-      controller = animateDom({ viewport: domViewport, marker: domMarker }, motion, { framing });
+      controller = animateDom({ viewport: domViewport, marker: domMarker }, motion, { framing, autoplay: !manuallyPaused });
     } else {
       staticPath = pathInput.checked && !pathInput.disabled && motion.kind === 'analytic'
         ? createSvgStaticPath({ viewport: svgViewport, path: svgFullPath, motion, framing }) : undefined;
@@ -269,14 +383,14 @@ const mount = (): void => {
       clearTrail = trail?.clear;
       disposeTrail = trail?.dispose;
       controller = animateSvg({ viewport: svgViewport, marker: svgMarker }, motion, {
-        framing,
+        framing, autoplay: !manuallyPaused,
         ...(trail ? { render(frame, targets) {
           trail.render(frame);
           renderSvgMarker(frame, targets);
         } } : {}),
       });
     }
-    pauseButton.textContent = 'Pause';
+    pauseButton.textContent = manuallyPaused ? 'Resume' : 'Pause';
     updateStatus();
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : String(error);
@@ -332,7 +446,31 @@ motionSelect.addEventListener('change', () => {
 rendererSelect.addEventListener('change', mount);
 for (const control of [fitSelect, zoomInput, offsetXInput, offsetYInput]) control.addEventListener('input', updateFraming);
 overflowSelect.addEventListener('change', () => { activeStage(rendererSelect.value as RendererName); updateStatus(); });
-for (const control of [colorInput, sizeInput, trailInput, pathInput]) control.addEventListener('change', () => { updateOutputs(); mount(); });
+for (const control of [colorInput, sizeInput]) control.addEventListener('change', () => {
+  updateOutputs();
+  if (webglController) updateFraming(); else mount();
+});
+for (const control of [trailInput, pathInput, webglAccumulate]) control.addEventListener('change', mount);
+for (const control of [webglShape, webglColorMode]) control.addEventListener('change', updateFraming);
+for (const control of [webglView, webglCamera]) control.addEventListener('change', () => {
+  if (!webglController) return;
+  try {
+    customBounds.checked = false;
+    for (const input of Object.values(boundsInputs)) input.disabled = true;
+    const camera = cameraForView();
+    setBoundsInputs(camera?.bounds ?? motionBounds);
+    webglCamera.disabled = !spatialView();
+    webglController.setCamera(camera);
+    updateFraming();
+  } catch (error) {
+    status.textContent = error instanceof Error ? error.message : String(error);
+  }
+});
+clearDrawingButton.addEventListener('click', () => {
+  webglController?.clear();
+  updateStatus();
+  status.textContent += ' Drawing cleared; motion time is unchanged.';
+});
 customBounds.addEventListener('change', () => {
   for (const input of Object.values(boundsInputs)) input.disabled = !customBounds.checked;
   updateFraming();
@@ -341,17 +479,20 @@ for (const input of Object.values(boundsInputs)) input.addEventListener('change'
 
 pauseButton.addEventListener('click', () => {
   if (!controller) return;
-  if (controller.isPaused()) {
+  if (manuallyPaused) {
     controller.resume();
+    manuallyPaused = false;
     pauseButton.textContent = 'Pause';
   } else {
     controller.pause();
+    manuallyPaused = true;
     pauseButton.textContent = 'Resume';
   }
 });
-resetButton.addEventListener('click', () => { clearTrail?.(); controller?.reset(); });
+resetButton.addEventListener('click', () => { clearTrail?.(); controller?.reset(); updateStatus(); });
 defaultsButton.addEventListener('click', () => {
   valuesByMotion.clear();
+  manuallyPaused = false;
   motionSelect.value = 'ellipse';
   rendererSelect.value = 'canvas';
   fitSelect.value = 'cover';
@@ -363,6 +504,11 @@ defaultsButton.addEventListener('click', () => {
   sizeInput.value = '9';
   trailInput.checked = false;
   pathInput.checked = false;
+  webglView.value = 'planar';
+  webglCamera.value = 'oblique';
+  webglShape.value = 'circle';
+  webglColorMode.value = 'solid';
+  webglAccumulate.checked = false;
   customBounds.checked = false;
   for (const input of Object.values(boundsInputs)) input.disabled = true;
   updateOutputs();

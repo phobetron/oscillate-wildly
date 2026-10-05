@@ -73,6 +73,111 @@ const analytic = (): AnalyticMotionSource<number> => ({
 const viewport = (): Viewport => ({ width: 200, height: 100 });
 
 describe('createController', () => {
+  it('keeps advancing across repeated renderer redraw notifications and reactivates zero-sized targets', () => {
+    const platform = new FakePlatform();
+    let available!: (available: boolean) => void;
+    let size = 100;
+    let elapsed = 0;
+    const controller = createController({
+      target: {}, source: analytic(), platform,
+      measureViewport: () => ({ width: size, height: size }),
+      observeAvailability: (notify) => { available = notify; return () => undefined; },
+      render: (frame) => { elapsed = frame.elapsedSeconds; },
+    });
+    platform.fire(0);
+    for (let index = 1; index <= 60; index++) {
+      available(true);
+      platform.fire(index * 16);
+    }
+    expect(elapsed).toBeCloseTo(0.96);
+    size = 0;
+    available(true);
+    expect(controller.isPaused()).toBe(true);
+    platform.fire(5000);
+    size = 100;
+    available(true);
+    expect(controller.isPaused()).toBe(false);
+    platform.fire(10000);
+    expect(elapsed).toBeCloseTo(0.96);
+    platform.fire(10016);
+    expect(elapsed).toBeCloseTo(0.976);
+    controller.dispose();
+  });
+  it('suspends availability independently and redraws restoration without advancing motion', () => {
+    const platform = new FakePlatform();
+    const frames: Frame<number>[] = [];
+    let notify!: (available: boolean) => void;
+    let releases = 0;
+    const controller = createController({
+      target: {}, source: analytic(), measureViewport: viewport, platform,
+      render: (frame) => frames.push(frame),
+      observeAvailability: (callback) => {
+        notify = callback;
+        return () => { releases += 1; };
+      },
+    });
+    platform.fire(0);
+    platform.fire(10);
+    notify(false);
+    expect(controller.isPaused()).toBe(true);
+    const suspendedFrames = frames.length;
+    platform.fire(1000);
+    expect(frames).toHaveLength(suspendedFrames);
+    notify(true);
+    expect(controller.isPaused()).toBe(false);
+    expect(frames).toHaveLength(suspendedFrames + 1);
+    expect(frames.at(-1)?.elapsedSeconds).toBeCloseTo(0.01, 8);
+    platform.fire(2000);
+    expect(frames).toHaveLength(suspendedFrames + 1);
+    platform.fire(2010);
+    expect(frames.at(-1)?.elapsedSeconds).toBeCloseTo(0.02, 8);
+    controller.dispose();
+    controller.dispose();
+    expect(releases).toBe(1);
+    notify(true);
+    expect(frames.at(-1)?.elapsedSeconds).toBeCloseTo(0.02, 8);
+  });
+
+  it('availability restoration preserves manual pause, visibility, intersection and reduced motion', () => {
+    for (const gate of ['manual', 'visibility', 'intersection', 'reduced'] as const) {
+      const platform = new FakePlatform();
+      const target = {};
+      let notify!: (available: boolean) => void;
+      const controller = createController({
+        target, source: analytic(), measureViewport: viewport, platform, offscreen: true,
+        render: () => undefined,
+        observeAvailability: (callback) => { notify = callback; return () => undefined; },
+      });
+      notify(false);
+      if (gate === 'manual') controller.pause();
+      if (gate === 'visibility') platform.setVisible(false);
+      if (gate === 'intersection') platform.intersectionCallbacks.get(target)?.(false);
+      if (gate === 'reduced') platform.setReducedMotion(true);
+      const requests = platform.requests;
+      notify(true);
+      expect(controller.isPaused()).toBe(true);
+      expect(platform.requests).toBe(requests);
+      if (gate === 'manual') controller.resume();
+      if (gate === 'visibility') platform.setVisible(true);
+      if (gate === 'intersection') platform.intersectionCallbacks.get(target)?.(true);
+      if (gate === 'reduced') platform.setReducedMotion(false);
+      expect(controller.isPaused()).toBe(false);
+      expect(platform.requests).toBe(requests + 1);
+      controller.dispose();
+    }
+  });
+
+  it('releases availability observation after failed setup', () => {
+    const platform = new FakePlatform();
+    let releases = 0;
+    expect(() => createController({
+      target: {}, source: analytic(), measureViewport: viewport, platform,
+      render: () => { throw new Error('render failed'); },
+      observeAvailability: () => () => { releases += 1; },
+    })).toThrow(/render failed/);
+    expect(releases).toBe(1);
+  });
+
   it('keeps visual-time progress comparable at 60, 120, and 144 Hz', () => {
     const results = [60, 120, 144].map((refreshRate) => {
       const platform = new FakePlatform();
@@ -154,7 +259,7 @@ describe('createController', () => {
       kind: 'stateful',
       bounds,
       step: (seconds) => { steps.push(seconds); state += 1; },
-      snapshot: () => ({ state, pose: { x: state, y: 0 } }),
+      snapshot: () => ({ state, pose: { x: state, y: 0, z: state * 3 } }),
       reset: () => { state = 0; },
     };
     const frames: Frame<number>[] = [];
@@ -164,6 +269,8 @@ describe('createController', () => {
     platform.fire(10);
     expect(steps).toHaveLength(1);
     expect(frames.at(-1)?.pose.x).toBeCloseTo(0.2, 8);
+    expect(frames.at(-1)?.pose.z).toBeCloseTo(0.6, 8);
+    expect(frames.at(-1)?.position.z).toBeCloseTo(0.6, 8);
 
     platform.fire(1010);
     expect(steps).toHaveLength(7);

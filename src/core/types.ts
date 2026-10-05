@@ -10,6 +10,8 @@ export interface Bounds {
 export interface Pose {
   readonly x: number;
   readonly y: number;
+  /** Optional world-space coordinate, independent of marker scale. */
+  readonly z?: number;
   /** Positive, bounded marker scale for renderers that support depth. */
   readonly depth?: number;
   readonly opacity?: number;
@@ -63,6 +65,8 @@ export interface Framing {
 }
 
 export interface ProjectedPose extends Pose {
+  /** Normalized camera depth: near is zero and far is one; outside values clip. */
+  readonly visibilityDepth?: number;
   readonly scaleX: number;
   readonly scaleY: number;
 }
