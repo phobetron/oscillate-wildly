@@ -10,97 +10,150 @@
       <header>
         <p class="eyebrow">Oscillate Wildly</p>
         <h1>Oscillators, curves, and attractors</h1>
-        <p class="intro">Explore parametric curves, oscillators, and attractors across four renderers. Use WebGL for 3D Lissajous, helix, and Lorenz motion or Duffing phase space, and choose a bounded trail or accumulate opaque markers with depth testing.</p>
+        <p class="intro">Explore parametric curves, oscillators, and attractors across four renderers. Use WebGL for 3D Lissajous, helix, and Lorenz motion or Duffing phase space, with optional lighting for retained geometry.</p>
       </header>
-      <section class="controls" aria-label="Animation controls">
-        <label>Motion
-          <select id="motion">
-            <option value="ellipse">Ellipse</option><option value="rose">Rose</option><option value="lissajous">Lissajous</option><option value="helix">Helix</option><option value="vander-pol">Van der Pol</option><option value="duffing">Duffing</option><option value="lorenz">Lorenz</option>
-          </select>
-        </label>
-        <label>Renderer
-          <select id="renderer"><option value="canvas">Canvas 2D</option><option value="webgl">WebGL</option><option value="dom">DOM</option><option value="svg">SVG</option></select>
-        </label>
-        <label>Fit
-          <select id="fit"><option value="cover">Cover</option><option value="contain">Contain</option><option value="stretch">Stretch</option></select>
-        </label>
-        <label>Zoom <output id="zoom-value" for="zoom">1.0×</output>
-          <input id="zoom" type="range" min="0.5" max="1.5" value="1" step="0.1" />
-        </label>
-        <label>Horizontal position <output id="offset-x-value" for="offset-x">0%</output>
-          <input id="offset-x" type="range" min="-1" max="1" value="0" step="0.05" />
-        </label>
-        <label>Vertical position <output id="offset-y-value" for="offset-y">0%</output>
-          <input id="offset-y" type="range" min="-1" max="1" value="0" step="0.05" />
-        </label>
-        <label>Overflow
-          <select id="overflow"><option value="clip">Clip</option><option value="visible">Visible</option></select>
-        </label>
-        <p id="overflow-note" class="control-note">Canvas pixels always clip to its bitmap.</p>
-        <div class="button-row"><button id="pause" type="button">Pause</button><button id="reset" type="button">Reset</button></div>
-      </section>
-      <section class="extra-controls" aria-label="Appearance and equation controls">
-        <fieldset>
-          <legend>Appearance</legend>
-          <div class="field-grid">
-            <label>Marker color <input id="marker-color" type="color" value="#67e8f9" /></label>
-            <label>Marker radius <output id="marker-size-value" for="marker-size">9 px</output>
-              <input id="marker-size" type="range" min="3" max="24" value="9" step="1" />
-            </label>
-            <label class="check-label"><input id="show-trail" type="checkbox" /> Show trail</label>
-            <label>Tail length (samples) <input id="trail-length" type="number" min="1" step="1" value="128" required disabled aria-describedby="visual-note" /></label>
-            <label class="check-label"><input id="show-path" type="checkbox" /> Show full path</label>
+      <div class="renderer-tabs" role="tablist" aria-label="Renderer">
+        <button id="tab-webgl" type="button" role="tab" data-renderer="webgl" aria-controls="panel-webgl" aria-selected="true" tabindex="0">WebGL</button>
+        <button id="tab-canvas" type="button" role="tab" data-renderer="canvas" aria-controls="panel-canvas" aria-selected="false" tabindex="-1">Canvas 2D</button>
+        <button id="tab-dom" type="button" role="tab" data-renderer="dom" aria-controls="panel-dom" aria-selected="false" tabindex="-1">DOM</button>
+        <button id="tab-svg" type="button" role="tab" data-renderer="svg" aria-controls="panel-svg" aria-selected="false" tabindex="-1">SVG</button>
+      </div>
+      <section id="panel-webgl" class="renderer-panel" role="tabpanel" aria-labelledby="tab-webgl">
+        <div class="renderer-layout">
+          <div data-settings-slot>
+            <section id="library-settings" class="library-settings" aria-label="Library configuration">
+              <fieldset id="motion-config">
+                <legend>Motion source</legend>
+                <label>Motion
+                  <select id="motion">
+                    <option value="duffing">Duffing</option><option value="ellipse" selected>Ellipse</option><option value="helix">Helix</option><option value="lissajous">Lissajous</option><option value="lorenz">Lorenz</option><option value="rose">Rose</option><option value="vander-pol">Van der Pol</option>
+                  </select>
+                </label>
+                <div id="parameter-controls" class="field-grid"></div>
+              </fieldset>
+              <fieldset id="projection-config">
+                <legend>Projection and framing</legend>
+                <label id="coordinates-control" data-renderers="webgl">Coordinates
+                  <select id="webgl-view" aria-describedby="webgl-note"><option value="spatial">3D coordinates</option><option value="planar" selected>Planar</option></select>
+                </label>
+                <label>Fit
+                  <select id="fit"><option value="contain">Contain</option><option value="cover" selected>Cover</option><option value="stretch">Stretch</option></select>
+                </label>
+                <label>Zoom <output id="zoom-value" for="zoom">1.0×</output>
+                  <input id="zoom" type="range" min="0.5" max="1.5" value="1" step="0.1" />
+                </label>
+                <label>Horizontal position <output id="offset-x-value" for="offset-x">0%</output>
+                  <input id="offset-x" type="range" min="-1" max="1" value="0" step="0.05" />
+                </label>
+                <label>Vertical position <output id="offset-y-value" for="offset-y">0%</output>
+                  <input id="offset-y" type="range" min="-1" max="1" value="0" step="0.05" />
+                </label>
+                <label class="check-label"><input id="custom-bounds" type="checkbox" /> Override the current view’s bounds</label>
+                <div id="bounds-controls" class="field-grid">
+                  <label>Min X <input id="min-x" type="number" step="any" /></label>
+                  <label>Max X <input id="max-x" type="number" step="any" /></label>
+                  <label>Min Y <input id="min-y" type="number" step="any" /></label>
+                  <label>Max Y <input id="max-y" type="number" step="any" /></label>
+                </div>
+              </fieldset>
+              <div id="native-marker-slot">
+                <fieldset id="marker-config">
+                  <legend>Marker</legend>
+                  <label>Marker color <input id="marker-color" type="color" value="#67e8f9" /></label>
+                  <label>Marker radius <output id="marker-size-value" for="marker-size">9 px</output>
+                    <input id="marker-size" type="range" min="3" max="24" value="9" step="1" />
+                  </label>
+                  <label id="marker-shape-control" data-renderers="webgl">Marker shape
+                    <select id="webgl-shape"><option value="circle" selected>Circle</option><option value="square">Square</option></select>
+                  </label>
+                </fieldset>
+              </div>
+              <fieldset id="history-config">
+                <legend>Drawing history</legend>
+                <label class="check-label"><input id="show-trail" type="checkbox" /> Show trail</label>
+                <label id="trail-length-control">Tail length (samples) <input id="trail-length" type="number" min="1" step="1" value="128" required disabled aria-describedby="visual-note" /></label>
+                <label id="path-control" class="check-label" data-renderers="canvas svg" data-analytic-only hidden><input id="show-path" type="checkbox" /> Show full path</label>
+                <label class="check-label" data-renderers="webgl"><input id="webgl-accumulate" type="checkbox" /> Accumulate drawing</label>
+                <label class="check-label" data-renderers="webgl"><input id="webgl-paint" type="checkbox" /> Paint ribbon</label>
+                <label data-renderers="webgl">Retained samples / paint limit <input id="accumulation-length" type="number" min="1" step="1" value="12000" required disabled aria-describedby="webgl-note" /></label>
+                <p id="visual-note" class="control-note">Trails are available for Canvas, SVG, and WebGL. Full paths require a periodic motion on Canvas or SVG.</p>
+              </fieldset>
+              <fieldset id="camera-config" data-renderers="webgl" hidden>
+                <legend>Camera</legend>
+                <label id="camera-preset-control" data-spatial-only hidden>Camera preset
+                  <select id="webgl-camera"><option value="custom" disabled>Dragged view</option><option value="front">Front</option><option value="oblique" selected>Oblique</option></select>
+                </label>
+                <p id="webgl-note" class="control-note">Choose WebGL for 3D Lissajous, Helix, Lorenz, or Duffing phase space.</p>
+              </fieldset>
+              <fieldset id="shading-config" data-renderers="webgl" data-spatial-only hidden>
+                <legend>Shading</legend>
+                <label class="check-label"><input id="webgl-lighting" type="checkbox" /> Lighting</label>
+              </fieldset>
+            </section>
           </div>
-          <p id="visual-note" class="control-note">Trails are available for Canvas, SVG, and WebGL. Full paths require a periodic motion on Canvas or SVG.</p>
-        </fieldset>
-        <fieldset>
-          <legend>WebGL view and drawing</legend>
-          <div class="field-grid">
-            <label>Coordinates
-              <select id="webgl-view" aria-describedby="webgl-note"><option value="planar">Planar</option><option value="spatial">3D coordinates</option></select>
-            </label>
-            <label>Camera preset
-              <select id="webgl-camera"><option value="oblique">Oblique</option><option value="front">Front</option><option value="custom" disabled>Dragged view</option></select>
-            </label>
-            <label>Marker shape
-              <select id="webgl-shape"><option value="circle">Circle</option><option value="square">Square</option></select>
-            </label>
-            <label>Marker color
-              <select id="webgl-color-mode"><option value="solid">Selected color</option><option value="time">Animate with time</option><option value="depth">Shade by view depth</option></select>
-            </label>
-            <label class="check-label"><input id="webgl-accumulate" type="checkbox" /> Accumulate drawing</label>
-            <button id="clear-drawing" type="button">Clear drawing</button>
+          <div class="output-column">
+            <section class="stage-shell" aria-label="WebGL animation output">
+              <canvas id="webgl-stage" class="stage" width="1280" height="720" aria-label="WebGL animation" aria-describedby="webgl-note"></canvas>
+            </section>
+            <div data-preview-slot>
+              <section id="preview-controls" class="preview-controls" aria-label="Preview and page controls">
+                <fieldset>
+                  <legend>Preview and playback</legend>
+                  <div class="button-row"><button id="pause" type="button">Pause</button><button id="reset" type="button">Reset</button><button id="clear-drawing" type="button" data-renderers="webgl">Clear drawing</button></div>
+                </fieldset>
+                <div id="presentation-marker-slot"></div>
+                <fieldset id="host-viewport-config" data-renderers="dom svg" hidden>
+                  <legend>Viewport styling</legend>
+                  <label>Overflow
+                    <select id="overflow"><option value="clip" selected>Clip</option><option value="visible">Visible</option></select>
+                  </label>
+                  <p id="overflow-note" class="control-note">Canvas pixels always clip to its bitmap.</p>
+                </fieldset>
+                <button id="defaults" type="button">Restore playground defaults</button>
+                <p id="webgl-frame" class="frame-readout" hidden>
+                  Elapsed <output id="webgl-time">0.000</output> s ·
+                  Marker-size scale <output id="webgl-size-scale">1.00</output> ·
+                  Visibility depth <output id="webgl-depth">0.500</output> (near 0, far 1)
+                </p>
+                <p id="status" class="status" aria-live="polite"></p>
+              </section>
+            </div>
           </div>
-          <p id="webgl-note" class="control-note">Choose WebGL for 3D Lissajous, Helix, Lorenz, or Duffing phase space.</p>
-        </fieldset>
-        <fieldset>
-          <legend>Equation</legend>
-          <div id="parameter-controls" class="field-grid"></div>
-        </fieldset>
-        <fieldset>
-          <legend>Custom projected bounds</legend>
-          <label class="check-label"><input id="custom-bounds" type="checkbox" /> Override the current view’s bounds</label>
-          <div id="bounds-controls" class="field-grid">
-            <label>Min X <input id="min-x" type="number" step="any" /></label>
-            <label>Max X <input id="max-x" type="number" step="any" /></label>
-            <label>Min Y <input id="min-y" type="number" step="any" /></label>
-            <label>Max Y <input id="max-y" type="number" step="any" /></label>
+        </div>
+      </section>
+      <section id="panel-canvas" class="renderer-panel" role="tabpanel" aria-labelledby="tab-canvas" hidden>
+        <div class="renderer-layout">
+          <div data-settings-slot></div>
+          <div class="output-column">
+            <section class="stage-shell" aria-label="Canvas animation output">
+              <canvas id="canvas-stage" class="stage" width="1280" height="720" aria-label="Canvas animation" hidden></canvas>
+            </section>
+            <div data-preview-slot></div>
           </div>
-        </fieldset>
-        <button id="defaults" type="button">Restore playground defaults</button>
+        </div>
       </section>
-      <section class="stage-shell" aria-label="Animation output">
-        <canvas id="canvas-stage" class="stage" width="1280" height="720" aria-label="Canvas animation"></canvas>
-        <canvas id="webgl-stage" class="stage" width="1280" height="720" aria-label="WebGL animation" aria-describedby="webgl-note" hidden></canvas>
-        <div id="dom-stage" class="stage dom-stage" aria-label="DOM animation"><div id="dom-marker" class="dom-marker" aria-hidden="true"></div></div>
-        <svg id="svg-stage" class="stage svg-stage" viewBox="0 0 1280 720" role="img" aria-label="SVG animation"><path id="svg-full-path" /><path id="svg-trail" /><g id="svg-marker"><circle r="13"></circle></g></svg>
+      <section id="panel-dom" class="renderer-panel" role="tabpanel" aria-labelledby="tab-dom" hidden>
+        <div class="renderer-layout">
+          <div data-settings-slot></div>
+          <div class="output-column">
+            <section class="stage-shell" aria-label="DOM animation output">
+              <div id="dom-stage" class="stage dom-stage" aria-label="DOM animation" hidden><div id="dom-marker" class="dom-marker" aria-hidden="true"></div></div>
+            </section>
+            <div data-preview-slot></div>
+          </div>
+        </div>
       </section>
-      <p id="webgl-frame" class="frame-readout" hidden>
-        Elapsed <output id="webgl-time">0.000</output> s ·
-        Marker-size scale <output id="webgl-size-scale">1.00</output> ·
-        Visibility depth <output id="webgl-depth">0.500</output> (near 0, far 1)
-      </p>
-      <p id="status" class="status" aria-live="polite"></p>
+      <section id="panel-svg" class="renderer-panel" role="tabpanel" aria-labelledby="tab-svg" hidden>
+        <div class="renderer-layout">
+          <div data-settings-slot></div>
+          <div class="output-column">
+            <section class="stage-shell" aria-label="SVG animation output">
+              <svg id="svg-stage" class="stage svg-stage" viewBox="0 0 1280 720" role="img" aria-label="SVG animation" hidden><path id="svg-full-path" /><path id="svg-trail" /><g id="svg-marker"><circle r="13"></circle></g></svg>
+            </section>
+            <div data-preview-slot></div>
+          </div>
+        </div>
+      </section>
     </main>
   </body>
 </html>

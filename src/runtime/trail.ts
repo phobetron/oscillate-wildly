@@ -14,6 +14,7 @@ export const createTrailHistory = <Sample>(maxSamples = 128) => {
   };
 
   return {
+    get size(): number { return samples.length; },
     add(sample: Sample, elapsedSeconds: number): void {
       if ((previousElapsedSeconds ?? 0) > 0 && elapsedSeconds === 0) clear();
       if (samples.length > 0 && elapsedSeconds === previousElapsedSeconds) {

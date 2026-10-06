@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { chromium } from 'playwright';
 
@@ -51,15 +51,172 @@ try {
   await page.goto(origin);
   await page.locator('#status').waitFor();
 
+  const switchRenderer = (renderer) => page.locator(`#tab-${renderer}`).click();
+  const rendererOrder = ['webgl', 'canvas', 'dom', 'svg'];
+  const assertActiveRenderer = async (renderer) => {
+    const tabs = await page.getByRole('tablist', { name: 'Renderer', exact: true }).getByRole('tab').evaluateAll((elements) => elements.map((tab) => ({
+      id: tab.id,
+      selected: tab.getAttribute('aria-selected'),
+      tabIndex: tab.tabIndex,
+      panel: tab.getAttribute('aria-controls'),
+    })));
+    assert.deepEqual(tabs.map((tab) => tab.id), rendererOrder.map((name) => `tab-${name}`));
+    for (const tab of tabs) {
+      const active = tab.id === `tab-${renderer}`;
+      assert.equal(tab.selected, String(active));
+      assert.equal(tab.tabIndex, active ? 0 : -1);
+      assert.equal(tab.panel, tab.id.replace('tab-', 'panel-'));
+      assert.equal(await page.locator(`#${tab.panel}`).getAttribute('aria-labelledby'), tab.id);
+    }
+    assert.equal(await page.getByRole('tabpanel').count(), 1, 'Only the active renderer panel is exposed');
+    assert.equal(await page.locator('.renderer-panel:not([hidden])').getAttribute('id'), `panel-${renderer}`);
+  };
+  await assertActiveRenderer('webgl');
+  assert.equal(await page.locator('#motion').inputValue(), 'ellipse');
+  assert.equal(await page.locator('#fit').inputValue(), 'cover');
+  await page.locator('#show-trail').focus();
+  await page.keyboard.press('Space');
+  assert.equal(await page.locator('#show-trail').evaluate((control) => control === document.activeElement), true, 'Reconfiguring the current renderer preserves control focus');
+  await page.keyboard.press('Space');
+  assert.equal(await page.locator('#show-trail').isChecked(), false);
+
+  // Arrow keys move tab focus; Enter and Space explicitly activate the focused renderer.
+  await page.locator('#tab-webgl').focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#tab-canvas').evaluate((tab) => tab === document.activeElement), true);
+  assert.equal(await page.locator('#tab-webgl').getAttribute('aria-selected'), 'true');
+  await page.keyboard.press('Enter');
+  await assertActiveRenderer('canvas');
+  await page.keyboard.press('End');
+  assert.equal(await page.locator('#tab-svg').evaluate((tab) => tab === document.activeElement), true);
+  await page.keyboard.press('Space');
+  await assertActiveRenderer('svg');
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('#tab-dom').evaluate((tab) => tab === document.activeElement), true);
+  await page.keyboard.press('Enter');
+  await assertActiveRenderer('dom');
+  await page.keyboard.press('Home');
+  assert.equal(await page.locator('#tab-webgl').evaluate((tab) => tab === document.activeElement), true);
+  await page.keyboard.press('Enter');
+  await assertActiveRenderer('webgl');
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('#tab-svg').evaluate((tab) => tab === document.activeElement), true, 'Left arrow wraps to the last tab');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#tab-webgl').evaluate((tab) => tab === document.activeElement), true, 'Right arrow wraps to the first tab');
+
+  const selectLabels = await page.locator('select').evaluateAll((selects) => selects.map((select) => ({
+    id: select.id,
+    labels: [...select.options].map((option) => option.textContent.trim()),
+  })));
+  for (const { id, labels } of selectLabels) {
+    assert.deepEqual(labels, [...labels].sort((a, b) => a.localeCompare(b)), `${id} options are alphabetical, including disabled options`);
+  }
+
+  for (const renderer of rendererOrder) {
+    await switchRenderer(renderer);
+    await assertActiveRenderer(renderer);
+    const placement = await page.evaluate((name) => {
+      const panel = document.querySelector(`#panel-${name}`);
+      const library = document.querySelector('#library-settings');
+      const preview = document.querySelector('#preview-controls');
+      const stage = panel.querySelector('.stage-shell');
+      const marker = document.querySelector('#marker-config');
+      return {
+        libraryInPanel: panel.contains(library),
+        previewInPanel: panel.contains(preview),
+        libraryBeforeOutput: Boolean(library.compareDocumentPosition(stage) & Node.DOCUMENT_POSITION_FOLLOWING),
+        previewAfterOutput: Boolean(stage.compareDocumentPosition(preview) & Node.DOCUMENT_POSITION_FOLLOWING),
+        markerInPreview: preview.contains(marker),
+        overflowInPreview: preview.contains(document.querySelector('#overflow')),
+        actionsInPreview: ['pause', 'reset', 'defaults', 'clear-drawing'].every((id) => preview.contains(document.querySelector(`#${id}`))),
+      };
+    }, renderer);
+    assert.equal(placement.libraryInPanel, true);
+    assert.equal(placement.previewInPanel, true);
+    assert.equal(placement.libraryBeforeOutput, true, `${renderer} library settings precede the output`);
+    assert.equal(placement.previewAfterOutput, true, `${renderer} preview controls follow the output`);
+    assert.equal(placement.markerInPreview, renderer === 'dom' || renderer === 'svg');
+    assert.equal(placement.overflowInPreview, true);
+    assert.equal(placement.actionsInPreview, true);
+    assert.equal(await page.locator('#host-viewport-config').isVisible(), renderer === 'dom' || renderer === 'svg');
+    assert.equal(await page.locator('#history-config').isVisible(), renderer !== 'dom');
+    assert.equal(await page.locator('#webgl-shape').isVisible(), renderer === 'webgl');
+    assert.equal(await page.locator('#webgl-view').isVisible(), renderer === 'webgl');
+    assert.equal(await page.locator('#webgl-accumulate').isVisible(), renderer === 'webgl');
+    assert.equal(await page.locator('#webgl-paint').isVisible(), renderer === 'webgl');
+    assert.equal(await page.locator('#clear-drawing').isVisible(), renderer === 'webgl');
+    assert.equal(await page.locator('#camera-config').isVisible(), false, 'Ellipse has no spatial camera settings');
+    assert.equal(await page.locator('#shading-config').isVisible(), false, 'Planar motion has no lighting settings');
+    assert.equal(await page.locator('#show-path').isVisible(), renderer === 'canvas' || renderer === 'svg');
+  }
+  await switchRenderer('webgl');
+  await page.selectOption('#motion', 'helix');
+  await page.selectOption('#webgl-view', 'spatial');
+  assert.equal(await page.locator('#camera-config').isVisible(), true);
+  assert.equal(await page.locator('#shading-config').isVisible(), true);
+  await page.selectOption('#webgl-view', 'planar');
+  assert.equal(await page.locator('#camera-config').isVisible(), false);
+  assert.equal(await page.locator('#shading-config').isVisible(), false);
+  await page.locator('#custom-bounds').check();
+  await page.locator('#min-x').fill('');
+  await switchRenderer('canvas');
+  await assertActiveRenderer('webgl');
+  assert.equal(await page.locator('#webgl-view').isVisible(), true, 'A failed switch retains the current renderer controls');
+  assert.match(await page.locator('#status').textContent(), /Custom bounds require/);
+  await page.locator('#min-x').fill('-1');
+  await page.locator('#min-x').press('Tab');
+  await switchRenderer('canvas');
+  await assertActiveRenderer('canvas');
+  await page.locator('#custom-bounds').uncheck();
+  await page.selectOption('#motion', 'lorenz');
+  assert.equal(await page.locator('#show-path').isVisible(), false, 'Integrated motions have no full-path control');
+  await page.selectOption('#fit', 'contain');
+  await page.click('#pause');
+  await switchRenderer('svg');
+  assert.equal(await page.locator('#motion').inputValue(), 'lorenz', 'Renderer changes retain the motion');
+  assert.equal(await page.locator('#fit').inputValue(), 'contain', 'Renderer changes retain shared configuration');
+  assert.equal(await page.locator('#pause').textContent(), 'Resume', 'Renderer changes preserve manual pause');
+  await page.click('#defaults');
+
+  await page.setViewportSize({ width: 375, height: 812 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'The playground fits a narrow viewport');
+  for (const renderer of rendererOrder) {
+    await switchRenderer(renderer);
+    await assertActiveRenderer(renderer);
+  }
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.click('#defaults');
+
+  const noWebGL = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+  await noWebGL.addInitScript(() => {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, ...args) {
+      return type === 'webgl' ? null : getContext.call(this, type, ...args);
+    };
+  });
+  await noWebGL.goto(origin);
+  await noWebGL.locator('#status').waitFor();
+  assert.match(await noWebGL.locator('#status').textContent(), /WebGL rendering context/);
+  await noWebGL.locator('#custom-bounds').check();
+  await noWebGL.locator('#min-x').fill('');
+  await noWebGL.locator('#tab-canvas').click();
+  assert.equal(await noWebGL.locator('#tab-webgl').getAttribute('aria-selected'), 'true', 'Invalid switches roll back even without an existing controller');
+  await noWebGL.locator('#min-x').fill('-1');
+  await noWebGL.locator('#min-x').press('Tab');
+  await noWebGL.locator('#tab-canvas').click();
+  assert.equal(await noWebGL.locator('#tab-canvas').getAttribute('aria-selected'), 'true', 'Corrected settings allow switching away from unsupported WebGL');
+  assert.equal(await noWebGL.locator('#panel-canvas').isVisible(), true);
+  await noWebGL.close();
+
   const initial = await page.evaluate(() => ({
     bitmap: [document.querySelector('#canvas-stage').width, document.querySelector('#canvas-stage').height],
     webglBitmap: [document.querySelector('#webgl-stage').width, document.querySelector('#webgl-stage').height],
     viewBox: document.querySelector('#svg-stage').getAttribute('viewBox'),
-    stage: document.querySelector('.stage-shell').getBoundingClientRect().toJSON(),
+    stage: document.querySelector('.renderer-panel:not([hidden]) .stage-shell').getBoundingClientRect().toJSON(),
   }));
 
   for (const renderer of ['canvas', 'dom', 'svg', 'webgl']) {
-    await page.selectOption('#renderer', renderer);
+    await switchRenderer(renderer);
     const visibility = await page.evaluate(() => Object.fromEntries(
       ['canvas', 'dom', 'svg', 'webgl'].map((name) => [name, getComputedStyle(document.querySelector(`#${name}-stage`)).display !== 'none']),
     ));
@@ -69,7 +226,7 @@ try {
       assert.match(await page.locator('#status').textContent(), /; cover at/);
     }
   }
-  await page.selectOption('#renderer', 'svg');
+  await switchRenderer('svg');
   for (const fit of ['cover', 'contain', 'stretch']) {
     await page.selectOption('#fit', fit);
     await page.locator('#zoom').fill('1.5');
@@ -80,15 +237,15 @@ try {
   await page.locator('#offset-y').fill('-0.25');
   assert.match(await page.locator('#status').textContent(), /position 50%\/-25%/);
   await page.selectOption('#overflow', 'visible');
-  assert.equal(await page.locator('.stage-shell').evaluate((element) => getComputedStyle(element).overflow), 'visible');
-  await page.selectOption('#renderer', 'canvas');
+  assert.equal(await page.locator('.renderer-panel:not([hidden]) .stage-shell').evaluate((element) => getComputedStyle(element).overflow), 'visible');
+  await switchRenderer('canvas');
   assert.equal(await page.locator('#overflow').isDisabled(), true);
   await page.selectOption('#motion', 'ellipse');
   await page.locator('#show-trail').check();
   await page.locator('#show-path').check();
-  await page.selectOption('#renderer', 'svg');
+  await switchRenderer('svg');
   assert.ok((await page.locator('#svg-full-path').getAttribute('d'))?.startsWith('M'));
-  await page.locator('.stage-shell').scrollIntoViewIfNeeded();
+  await page.locator('.renderer-panel:not([hidden]) .stage-shell').scrollIntoViewIfNeeded();
   await page.waitForTimeout(80);
   assert.ok((await page.locator('#svg-trail').getAttribute('d'))?.startsWith('M'));
   assert.equal(await page.locator('#trail-length').isDisabled(), false);
@@ -96,13 +253,13 @@ try {
   await page.locator('#trail-length').press('Tab');
   await page.waitForTimeout(100);
   assert.equal(((await page.locator('#svg-trail').getAttribute('d'))?.match(/[ML]/g) ?? []).length, 3, 'Configured SVG tail length limits retained points');
-  await page.selectOption('#renderer', 'canvas');
+  await switchRenderer('canvas');
   assert.equal(await page.locator('#trail-length').isDisabled(), false);
   assert.equal(await page.locator('#trail-length').inputValue(), '3', 'Configured length is shared across renderers');
-  await page.selectOption('#renderer', 'dom');
+  await switchRenderer('dom');
   assert.equal(await page.locator('#show-trail').isDisabled(), true);
   assert.equal(await page.locator('#trail-length').isDisabled(), true);
-  await page.selectOption('#renderer', 'svg');
+  await switchRenderer('svg');
   await page.locator('#parameter-controls [data-parameter="radiusX"]').fill('1.5');
   await page.locator('#parameter-controls [data-parameter="radiusX"]').press('Tab');
   await page.selectOption('#motion', 'lorenz');
@@ -121,7 +278,7 @@ try {
   await page.locator('#marker-size').fill('24');
   await page.selectOption('#fit', 'contain');
   for (const renderer of ['dom', 'svg']) {
-    await page.selectOption('#renderer', renderer);
+    await switchRenderer(renderer);
     await page.locator(`#${renderer}-stage`).scrollIntoViewIfNeeded();
     for (let sample = 0; sample < 12; sample += 1) {
       await page.waitForTimeout(90);
@@ -136,29 +293,29 @@ try {
       assert.ok(extents.marker.bottom <= extents.viewport.bottom + 0.5, `${renderer} marker escaped bottom in contain`);
     }
   }
-  await page.selectOption('#renderer', 'canvas');
-  await page.locator('.stage-shell').scrollIntoViewIfNeeded();
+  await switchRenderer('canvas');
+  await page.locator('.renderer-panel:not([hidden]) .stage-shell').scrollIntoViewIfNeeded();
   await page.waitForTimeout(60);
   const firstCanvasFrame = await page.locator('#canvas-stage').evaluate((canvas) => canvas.toDataURL());
   await page.waitForTimeout(140);
   assert.notEqual(await page.locator('#canvas-stage').evaluate((canvas) => canvas.toDataURL()), firstCanvasFrame);
-  await page.selectOption('#renderer', 'dom');
-  await page.locator('.stage-shell').scrollIntoViewIfNeeded();
+  await switchRenderer('dom');
+  await page.locator('.renderer-panel:not([hidden]) .stage-shell').scrollIntoViewIfNeeded();
   await page.waitForTimeout(60);
   const firstDomFrame = await page.locator('#dom-marker').evaluate((element) => getComputedStyle(element).transform);
   await page.waitForTimeout(140);
   assert.notEqual(await page.locator('#dom-marker').evaluate((element) => getComputedStyle(element).transform), firstDomFrame);
-  await page.selectOption('#renderer', 'svg');
-  await page.locator('.stage-shell').scrollIntoViewIfNeeded();
+  await switchRenderer('svg');
+  await page.locator('.renderer-panel:not([hidden]) .stage-shell').scrollIntoViewIfNeeded();
   await page.waitForTimeout(60);
   const firstSvgFrame = await page.locator('#svg-marker').getAttribute('transform');
   await page.waitForTimeout(140);
   assert.notEqual(await page.locator('#svg-marker').getAttribute('transform'), firstSvgFrame);
   await page.click('#defaults');
 
-  await page.selectOption('#renderer', 'dom');
+  await switchRenderer('dom');
   await page.selectOption('#motion', 'ellipse');
-  await page.locator('.stage-shell').scrollIntoViewIfNeeded();
+  await page.locator('.renderer-panel:not([hidden]) .stage-shell').scrollIntoViewIfNeeded();
   await page.waitForTimeout(100);
   await page.click('#pause');
   const paused = await page.locator('#dom-marker').evaluate((element) => getComputedStyle(element).transform);
@@ -281,7 +438,7 @@ try {
           control.dispatchEvent(new Event(event, { bubbles: true }));
         };
         change('#motion', motion);
-        change('#renderer', renderer);
+        document.querySelector(`#tab-${renderer}`).click();
         change('#fit', 'contain', 'input');
         change('#marker-size', '24');
         document.querySelector('#reset').click();
@@ -329,7 +486,7 @@ try {
   }
 
   await page.selectOption('#motion', 'lissajous');
-  await page.selectOption('#renderer', 'dom');
+  await switchRenderer('dom');
   await page.locator('#parameter-controls [data-parameter="periodSeconds"]').fill('4');
   await page.locator('#parameter-controls [data-parameter="periodSeconds"]').press('Tab');
   await page.locator('#dom-stage').scrollIntoViewIfNeeded();
@@ -355,7 +512,7 @@ try {
 
   await page.click('#defaults');
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.selectOption('#renderer', 'webgl');
+  await switchRenderer('webgl');
   await page.evaluate(() => document.querySelector('#pause').click());
   assert.equal(await page.locator('#pause').textContent(), 'Resume');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -378,17 +535,14 @@ try {
   const singleFrame = await animateWebGLFor(0.2);
   assert.ok(singleFrame.count > 0, 'Planar example must animate and paint');
   assert.ok((await webglReadout()).time > pausedWebGL.time);
-  const beforeTimeColor = await webglReadout();
-  const timeColor = await webglChange('#webgl-color-mode', 'time');
-  assert.notDeepEqual(timeColor.colors, redSquare.colors, 'Time color mode changes the painted color');
-  assert.deepEqual(await webglReadout(), beforeTimeColor, 'Time color redraw preserves elapsed motion and pause');
-  await webglChange('#webgl-color-mode', 'solid');
+  assert.equal(await page.locator('#webgl-lighting').isDisabled(), true, 'Lighting control is available for the 3D view');
   await webglChange('#show-trail', true);
   assert.equal(await page.locator('#webgl-accumulate').isChecked(), false);
   assert.equal(await page.locator('#trail-length').isDisabled(), false);
   await webglChange('#trail-length', 16);
   const withTrail = await animateWebGLFor(0.25);
-  assert.ok(withTrail.count > singleFrame.count, 'WebGL Show trail paints a connected tail');
+  const currentMarkerDiameter = 2 * 24 * (await webglReadout()).size;
+  assert.ok(Math.max(...withTrail.size) > currentMarkerDiameter + 2, 'WebGL Show trail extends beyond the current marker footprint');
   const beforeInvalidLength = await webglReadout();
   for (const length of [0, '', 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     await webglChange('#trail-length', length);
@@ -402,6 +556,15 @@ try {
   await webglChange('#webgl-accumulate', true);
   assert.equal(await page.locator('#show-trail').isChecked(), false);
   assert.equal(await page.locator('#trail-length').isDisabled(), true);
+  assert.equal(await page.locator('#accumulation-length').isDisabled(), false);
+  assert.equal(await page.locator('#accumulation-length').inputValue(), '12000');
+  const beforeInvalidAccumulationLength = await webglReadout();
+  for (const length of [0, '', 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    await webglChange('#accumulation-length', length);
+    assert.match(await page.locator('#status').textContent(), /positive safe integer/);
+    assert.deepEqual(await webglReadout(), beforeInvalidAccumulationLength, 'Invalid accumulation length preserves the animation');
+  }
+  await webglChange('#accumulation-length', 12000);
   await webglClick('#reset');
   assert.equal((await webglReadout()).time, 0, 'Reset returns source elapsed time to zero');
   const accumulated = await animateWebGLFor(0.25);
@@ -422,7 +585,7 @@ try {
     await webglChange('#webgl-camera', 'front');
     await webglChange('#webgl-view', 'spatial');
     assert.equal(await page.locator('#webgl-camera').isDisabled(), false);
-    await webglChange('#webgl-color-mode', 'depth');
+    await webglChange('#webgl-lighting', true);
     if (motion === 'lissajous') {
       assert.equal(await page.locator('#parameter-controls [data-parameter="cyclesZ"]').inputValue(), '3');
       await webglChange('#parameter-controls [data-parameter="periodSeconds"]', 4);
@@ -562,6 +725,79 @@ try {
   assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Planar view does not capture drags');
   await page.evaluate(() => window.stopOrbitRecording());
   await webglChange('#show-trail', false);
+
+  await webglChange('#webgl-view', 'spatial');
+  await webglChange('#webgl-camera', 'front');
+  await webglChange('#webgl-accumulate', true);
+  const orbitPaint = await animateWebGLFor(0.3);
+  const paintTime = await webglReadout();
+  await page.evaluate(() => {
+    const canvas = document.querySelector('#webgl-stage');
+    window.orbitRasters = [];
+    const record = () => window.orbitRasters.push(window.demoWebGLPixels());
+    canvas.addEventListener('pointermove', record);
+    window.stopOrbitRecording = () => canvas.removeEventListener('pointermove', record);
+  });
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 100, start.y + 60, { steps: 5 });
+  await page.mouse.up();
+  const orbitPaintAfter = await page.evaluate(() => window.orbitRasters.at(-1));
+  assert.ok(orbitPaintAfter.count > 0, 'Dragging with accumulation redraws retained markers');
+  assert.notEqual(orbitPaintAfter.hash, orbitPaint.hash, 'The accumulated 3D drawing rotates with the camera');
+  const paintTimeAfter = await webglReadout();
+  assert.equal(paintTimeAfter.time, paintTime.time, 'Accumulated orbit preserves motion time');
+  assert.equal(paintTimeAfter.pause, paintTime.pause, 'Accumulated orbit preserves manual pause');
+  const presetPaint = await webglChange('#webgl-camera', 'front');
+  assert.equal(presetPaint.hash, orbitPaint.hash, 'Returning to the original camera restores the entire accumulated drawing');
+  await page.evaluate(() => window.stopOrbitRecording());
+
+  await webglChange('#webgl-shape', 'circle');
+  await webglChange('#webgl-lighting', false);
+  await webglChange('#webgl-paint', true);
+  assert.equal(await page.locator('#webgl-accumulate').isChecked(), false);
+  assert.equal(await page.locator('#show-trail').isChecked(), false);
+  assert.equal(await page.locator('#accumulation-length').isDisabled(), false);
+  const ribbonRaster = await animateWebGLFor(0.3);
+  const ribbonTime = await webglReadout();
+  const litRibbon = await webglChange('#webgl-lighting', true);
+  assert.equal(litRibbon.count, ribbonRaster.count, 'Lighting preserves ribbon coverage and the size cue');
+  assert.notEqual(litRibbon.hash, ribbonRaster.hash, 'Lighting shades the entire retained ribbon while paused');
+  assert.deepEqual(await webglReadout(), ribbonTime, 'Lighting preserves motion time, size, depth, and pause');
+  const flatRibbonAgain = await webglChange('#webgl-lighting', false);
+  assert.equal(flatRibbonAgain.hash, ribbonRaster.hash, 'Switching back to flat restores the original painted base colors');
+  const squareBrush = await webglChange('#webgl-shape', 'square');
+  assert.equal(squareBrush.hash, ribbonRaster.hash, 'Paused shape changes leave deposited brush footprints unchanged');
+  assert.equal((await webglReadout()).time, ribbonTime.time, 'Shape changes preserve the painting and motion time');
+  const circleBrush = await webglChange('#webgl-shape', 'circle');
+  assert.equal(circleBrush.hash, ribbonRaster.hash, 'Switching marker shape back leaves the same deposited paint');
+  const obliqueRibbon = await webglChange('#webgl-camera', 'oblique');
+  assert.ok(obliqueRibbon.count > 0, 'World-space ribbon redraws through an oblique camera');
+  assert.notEqual(obliqueRibbon.hash, ribbonRaster.hash, 'Ribbon geometry rotates with the camera');
+  assert.equal((await webglChange('#webgl-camera', 'front')).hash, ribbonRaster.hash, 'Returning to the original view restores the same ribbon');
+  assert.equal((await webglReadout()).time, ribbonTime.time);
+  await webglChange('#accumulation-length', 3);
+  const cappedBrush = await page.evaluate(() => new Promise((resolvePaint, reject) => {
+    const pause = document.querySelector('#pause');
+    const observer = new MutationObserver(() => {
+      if (pause.textContent !== 'Resume') return;
+      observer.disconnect(); clearTimeout(timeout);
+      resolvePaint(window.demoWebGLPixels());
+    });
+    const timeout = setTimeout(() => { observer.disconnect(); reject(new Error('Brush did not pause at its paint limit')); }, 5000);
+    observer.observe(pause, { childList: true, subtree: true, characterData: true });
+    pause.click();
+  }));
+  assert.ok(cappedBrush.count > 0, 'The example retains painted geometry when the budget fills');
+  assert.match(await page.locator('#status').textContent(), /Paint limit reached/);
+  const stoppedBrush = await webglReadout();
+  await page.locator('#pause').click();
+  assert.deepEqual(await webglReadout(), stoppedBrush, 'Full brush cannot resume and overwrite its beginning');
+  assert.equal((await webglClick('#clear-drawing')).count, 0, 'Clear removes the completed brush painting');
+  assert.doesNotMatch(await page.locator('#status').textContent(), /Paint limit reached/);
+  await webglChange('#accumulation-length', 12000);
+  await webglChange('#webgl-paint', false);
+
   await webglChange('#motion', 'duffing');
   await webglChange('#webgl-view', 'spatial');
   await webglChange('#webgl-camera', 'front');
@@ -613,21 +849,24 @@ try {
   assert.equal(await page.locator('#webgl-view').inputValue(), 'planar');
   assert.equal(await page.locator('#webgl-view option[value="spatial"]').evaluate((option) => option.disabled), true);
   await page.click('#defaults');
-  assert.equal(await page.locator('#renderer').inputValue(), 'canvas');
+  assert.equal(await page.locator('#tab-webgl').getAttribute('aria-selected'), 'true');
   assert.equal(await page.locator('#motion').inputValue(), 'ellipse');
   assert.equal(await page.locator('#pause').textContent(), 'Pause');
   assert.equal(await page.locator('#webgl-view').inputValue(), 'planar');
   assert.equal(await page.locator('#webgl-camera').inputValue(), 'oblique');
   assert.equal(await page.locator('#webgl-shape').inputValue(), 'circle');
-  assert.equal(await page.locator('#webgl-color-mode').inputValue(), 'solid');
+  assert.equal(await page.locator('#webgl-paint').isChecked(), false);
+  assert.equal(await page.locator('#webgl-lighting').isChecked(), false);
   assert.equal(await page.locator('#webgl-accumulate').isChecked(), false);
-  assert.equal(await page.locator('#clear-drawing').isDisabled(), true);
+  assert.equal(await page.locator('#accumulation-length').inputValue(), '12000');
+  assert.equal(await page.locator('#accumulation-length').isDisabled(), true);
+  assert.equal(await page.locator('#clear-drawing').isDisabled(), false);
 
   const final = await page.evaluate(() => ({
     bitmap: [document.querySelector('#canvas-stage').width, document.querySelector('#canvas-stage').height],
     webglBitmap: [document.querySelector('#webgl-stage').width, document.querySelector('#webgl-stage').height],
     viewBox: document.querySelector('#svg-stage').getAttribute('viewBox'),
-    stage: document.querySelector('.stage-shell').getBoundingClientRect().toJSON(),
+    stage: document.querySelector('.renderer-panel:not([hidden]) .stage-shell').getBoundingClientRect().toJSON(),
   }));
   assert.deepEqual(final.bitmap, initial.bitmap);
   assert.deepEqual(initial.webglBitmap, [1280, 720]);
@@ -637,6 +876,7 @@ try {
   assert.equal(final.stage.height, initial.stage.height);
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(failedAssets, []);
+
 
   await page.evaluate(async () => {
     const { animateSvg } = await import('/lib/svg/index.js');
@@ -711,7 +951,10 @@ try {
     rect = dot.getBoundingClientRect();
     const svgX = rect.left + rect.width / 2;
     const svgY = rect.top + rect.height / 2;
-    if (document.elementFromPoint(svgX, svgY) !== dot) throw new Error('SVG visible overflow did not paint outside the viewport');
+    if (document.elementFromPoint(svgX, svgY) !== dot) {
+      const hit = document.elementFromPoint(svgX, svgY);
+      throw new Error(`SVG visible overflow did not paint outside the viewport at ${svgX},${svgY}; hit ${hit?.tagName}#${hit?.id}; overflow ${getComputedStyle(svg).overflow}; rect ${JSON.stringify(rect.toJSON())}; viewport ${innerWidth}x${innerHeight}, visual ${visualViewport.width}x${visualViewport.height} scale ${visualViewport.scale}`);
+    }
     svg.style.overflow = 'hidden';
     if (document.elementFromPoint(svgX, svgY) === dot) throw new Error('SVG clipped overflow remained visible');
     svgController.dispose();
@@ -864,6 +1107,11 @@ try {
         },
         reset() { resets += 1; index = 0; },
       };
+      if (options.withoutDerivatives) {
+        const context = canvas.getContext('webgl', { alpha: true, depth: true, antialias: false });
+        const getExtension = context.getExtension.bind(context);
+        context.getExtension = (name) => name === 'OES_standard_derivatives' ? null : getExtension(name);
+      }
       const controller = animateWebGL(canvas, source, {
         autoplay: false, offscreen: false, accumulate: true,
         framing: { fit: 'stretch', padding: 0 }, platform,
@@ -903,6 +1151,13 @@ try {
           check([...rgba].every((value, channel) => Math.abs(value - expected[channel]) <= 1), `${label}: expected ${expected}, got ${[...rgba]}`);
           const error = gl.getError();
           check(error === gl.NO_ERROR, `${label}: WebGL error ${error} during pixel read`);
+        },
+        rgba(x, y) {
+          const rgba = new Uint8Array(4);
+          const rect = canvas.getBoundingClientRect();
+          gl.readPixels(Math.floor(x * canvas.width / rect.width), canvas.height - 1 - Math.floor(y * canvas.height / rect.height), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+          check(gl.getError() === gl.NO_ERROR, 'Lighting pixel read produced a WebGL error');
+          return [...rgba];
         },
         dispose() { controller.dispose(); canvas.remove(); },
       };
@@ -993,6 +1248,86 @@ try {
         target.pixel(50, 50, green, `Near marker must win with nearFirst=${nearFirst}`);
         target.dispose();
       }
+
+      const lightingCamera = { position: { x: 0, y: 0, z: 5 }, bounds, near: 1, far: 9 };
+      const brightness = (pixel) => pixel[0] + pixel[1] + pixel[2];
+      for (const shape of ['circle', 'square']) {
+        for (const withoutDerivatives of [false, true]) {
+          const depthLit = fixture([
+            { pose: { x: -0.5, z: 2, depth: 0.75 }, marker: { shape, color: [0.6, 0.7, 0.9] } },
+            { pose: { x: 0.5, z: -2, depth: 0.75 }, marker: { shape, color: [0.6, 0.7, 0.9] } },
+          ], { camera: lightingCamera, withoutDerivatives });
+          depthLit.advance(1);
+          const flatNear = depthLit.rgba(25, 50);
+          const flatFar = depthLit.rgba(75, 50);
+          depthLit.controller.setLighting(true);
+          const near = depthLit.rgba(25, 50);
+          const far = depthLit.rgba(75, 50);
+          check(brightness(near) > brightness(far), 'Lighting separates near and far retained markers');
+          check(brightness(near) !== brightness(flatNear), 'Lighting changes rendered color');
+          check(near[3] === 255 && far[3] === 255, 'Lighting preserves opaque marker coverage');
+          check(depthLit.rgba(28, 50).every((value, index) => value === near[index]), 'Flat markers keep a plane normal, not a sphere gradient');
+          depthLit.controller.setCamera({ ...lightingCamera, position: { x: 0, y: 0, z: -5 } });
+          check(brightness(depthLit.rgba(25, 50)) > brightness(depthLit.rgba(75, 50)), 'Depth shading follows the current camera across retained history');
+          depthLit.controller.setCamera(lightingCamera);
+          depthLit.controller.setLighting(false);
+          check(depthLit.rgba(25, 50).every((value, index) => value === flatNear[index]), 'Flat mode restores captured base RGB exactly');
+          check(depthLit.rgba(75, 50).every((value, index) => value === flatFar[index]), 'Flat mode restores old samples too');
+          depthLit.dispose();
+        }
+      }
+
+      for (const mode of [{ trail: { width: 8 } }, { paint: true }]) {
+        const surface = fixture([
+          { pose: { x: -0.8, z: 2 }, marker: { color: [0.2, 0.6, 1] } },
+          { pose: { x: 0.8, z: -2 }, marker: { color: [0.2, 0.6, 1] } },
+        ], { camera: lightingCamera, accumulate: false, ...mode });
+        surface.advance(1);
+        const flat = surface.rgba(50, 50);
+        surface.controller.setLighting(true);
+        const lit = surface.rgba(50, 50);
+        check(lit[3] === flat[3] && lit[3] === 255, 'Surface lighting keeps the same ribbon/tail pixels');
+        check(brightness(lit) !== brightness(flat), 'Surface lighting changes retained ribbon/tail shading');
+        const near = surface.rgba(30, 50);
+        const far = surface.rgba(70, 50);
+        check(brightness(near) > brightness(far), 'Surface lighting includes the actual interpolated view depth');
+        surface.canvas.width = surface.canvas.height = 200;
+        surface.observers.resize();
+        check(surface.rgba(50, 50).every((value, index) => Math.abs(value - lit[index]) <= 1), 'Surface normals account for backing-pixel scale');
+        surface.controller.setFraming({ fit: 'stretch', zoom: 2 });
+        check(surface.rgba(50, 50).every((value, index) => Math.abs(value - lit[index]) <= 1), 'Zoom changes projection without changing physical surface lighting');
+        surface.controller.setFraming({ fit: 'stretch' });
+        const restoreSurface = await lose(surface);
+        await restoreSurface();
+        check(surface.rgba(50, 50).every((value, index) => Math.abs(value - lit[index]) <= 1), 'Context restoration retains lighting and geometry');
+        surface.controller.setLighting(false);
+        check(surface.rgba(50, 50).every((value, index) => Math.abs(value - flat[index]) <= 1), 'Flat surface base color survives lighting and recovery');
+        surface.dispose();
+      }
+
+      for (const shape of ['circle', 'square']) {
+        const joined = fixture([
+          { pose: { x: -0.8, z: 2 }, marker: { shape, color: [0.2, 0.6, 1] } },
+          { pose: { x: 0.8, z: -2 }, marker: { shape, color: [0.2, 0.6, 1] } },
+        ], { camera: lightingCamera, accumulate: false, paint: true, lighting: true });
+        joined.advance(1);
+        const start = joined.rgba(8, 50);
+        const startSurface = joined.rgba(22, 50);
+        const end = joined.rgba(92, 50);
+        const endSurface = joined.rgba(78, 50);
+        check(start[3] === 255 && end[3] === 255, 'Aligned endpoint markers stay visible on their adjoining planes');
+        check(start.every((value, index) => Math.abs(value - startSurface[index]) <= 3), 'Starting marker receives the same surface lighting as the ribbon');
+        check(end.every((value, index) => Math.abs(value - endSurface[index]) <= 3), 'Leading marker receives the same surface lighting as the ribbon');
+        const restoreJoined = await lose(joined);
+        await restoreJoined();
+        check(joined.rgba(92, 50).every((value, index) => value === end[index]), 'Recovery retains endpoint orientation and shading');
+        joined.controller.setCamera({ ...lightingCamera, position: { x: 0, y: 0, z: -5 } });
+        const reverseEnd = joined.rgba(8, 50);
+        const reverseSurface = joined.rgba(22, 50);
+        check(reverseEnd[3] === 255, 'Aligned endpoint remains attached when viewed from the opposite side');
+        check(reverseEnd.every((value, index) => Math.abs(value - reverseSurface[index]) <= 3), 'Endpoint and ribbon shading stay consistent after camera rotation');
+        joined.dispose();
+      }
       const corners = fixture([
         { visibilityDepth: 0.2, marker: { color: [0, 1, 0] } },
         { visibilityDepth: 0.8, marker: { shape: 'square' } },
@@ -1044,13 +1379,137 @@ try {
       projected.pixel(75, 25, red, 'Camera projects selected 3D coordinates');
       projected.pixel(25, 25, blank, 'Camera uses position callback instead of legacy pose');
       projected.controller.setCamera({ ...camera, bounds: { minX: -2, maxX: 2, minY: -2, maxY: 2 } });
-      projected.pixel(75, 25, blank, 'Camera update clears old projection');
+      projected.pixel(75, 25, blank, 'Camera update moves retained geometry out of its old projection');
       projected.pixel(62, 37, red, 'Camera update reprojects current frame');
       check(projected.controller.isPaused() && projected.resets === 0 && projected.sampledTime === 0, 'Camera update changed motion or pause');
       projected.controller.setCamera(undefined);
       projected.pixel(75, 75, red, 'Removing camera restores planar projection');
-      projected.pixel(62, 37, blank, 'Removing camera clears old camera projection');
+      projected.pixel(62, 37, blank, 'Removing camera reprojects retained geometry');
       projected.dispose();
+
+      const rotatingDepth = fixture([
+        { pose: { x: -0.5, z: 2 } },
+        { pose: { x: -0.5, z: -2 }, marker: { color: [0, 1, 0] } },
+      ], { camera });
+      rotatingDepth.advance(1);
+      rotatingDepth.pixel(25, 50, red, 'Near retained marker occludes the far marker');
+      rotatingDepth.controller.setCamera({ ...camera, position: { x: 0, y: 0, z: -5 } });
+      rotatingDepth.pixel(75, 50, green, 'Orbiting reverses occlusion using all retained world positions');
+      rotatingDepth.pixel(25, 50, blank, 'Orbiting leaves no paint in the old projection');
+      rotatingDepth.controller.setCamera(camera);
+      rotatingDepth.pixel(25, 50, red, 'Returning to the camera restores the original occlusion');
+      rotatingDepth.dispose();
+
+      const styledSamples = [
+        { pose: { x: -0.5 }, marker: { radius: 5 } },
+        { pose: { x: 0 }, marker: { radius: 10, shape: 'square', color: [0, 1, 0] } },
+        { pose: { x: 0.5 }, marker: { radius: 5, color: [0, 0, 1] } },
+        { pose: { x: -0.5 }, marker: { radius: 5, color: [1, 1, 0] } },
+      ];
+      const bounded = fixture(styledSamples, { camera, accumulate: { maxSamples: 3 } });
+      bounded.advance(1); bounded.advance(2); bounded.advance(3);
+      // Changing the latest appearance at the same time replaces its wrapped
+      // slot. Earlier shapes/colors must remain the captured values.
+      styledSamples[3].marker.radius = 2;
+      styledSamples[3].marker.shape = 'square';
+      styledSamples[3].marker.color = [1, 0, 1];
+      bounded.controller.setCamera({ ...camera, position: { x: 0, y: 0, z: -5 } });
+      bounded.pixel(75, 50, [255, 0, 255, 255], 'Same-time replacement updates the latest wrapped slot');
+      bounded.pixel(78, 50, blank, 'Replacement removes the old larger marker footprint');
+      bounded.pixel(58, 58, green, 'Earlier square keeps its sampled shape and color');
+      bounded.pixel(25, 50, [0, 0, 255, 255], 'Earlier circle keeps its sampled color');
+      bounded.pixel(29, 54, blank, 'Earlier circle retains discarded corners');
+      bounded.dispose();
+
+      const expired = fixture([{ pose: { x: -0.5 } }, { pose: { x: 0 } }, { pose: { x: 0.5 } }], {
+        camera, accumulate: { maxSamples: 2 },
+      });
+      expired.advance(1); expired.advance(2);
+      expired.pixel(25, 50, blank, 'Oldest geometry expires at the sample cap');
+      expired.controller.setCamera({ ...camera, position: { x: 0, y: 0, z: -5 } });
+      expired.pixel(75, 50, blank, 'Expired geometry cannot reappear after camera rotation');
+      expired.pixel(25, 50, red, 'Latest geometry rotates after buffer wrap');
+      expired.dispose();
+
+      const retainedClip = fixture([{ pose: { x: -0.5, z: 4.5 } }, { pose: { x: 0.5 } }], { camera });
+      retainedClip.advance(1);
+      retainedClip.pixel(25, 50, blank, 'Near-clipped samples are initially hidden');
+      retainedClip.controller.setCamera({ ...camera, position: { x: 0, y: 0, z: 6 }, far: 10 });
+      retainedClip.pixel(25, 50, red, 'Clipped retained geometry becomes visible in a new camera');
+      retainedClip.dispose();
+
+      const ribbonCamera = { ...camera, position: { x: 0, y: -5, z: 0 }, up: { x: 0, y: 0, z: 1 } };
+      const brush = { shape: 'circle', radius: 10 };
+      const sheet = fixture([{ pose: { x: -0.5 }, marker: brush }, { pose: { x: 0.5 }, marker: brush }], {
+        camera: ribbonCamera, accumulate: false, paint: true,
+      });
+      sheet.advance(1);
+      sheet.pixel(50, 50, red, 'The marker paints continuously between samples');
+      sheet.pixel(50, 57, red, 'Brush width follows marker diameter');
+      sheet.pixel(50, 62, blank, 'Brush paint stays within the marker footprint');
+      sheet.pixel(20, 50, red, 'The beginning of a circular brush stroke has a rounded cap');
+      sheet.pixel(16, 59, blank, 'The starting cap discards corners instead of leaving a square end');
+      sheet.pixel(83, 50, red, 'The stroke ends with the retained circular brush footprint');
+      sheet.pixel(83, 59, blank, 'The end cap rounds off its corners');
+      sheet.controller.setCamera(camera);
+      sheet.pixel(50, 50, blank, 'Deposited paint rotates edge-on as fixed 3D geometry');
+      sheet.pixel(75, 50, blank, 'The leading footprint turns edge-on instead of facing the camera like a sphere');
+      sheet.pixel(25, 50, blank, 'The starting cap shares the retained paint plane');
+      sheet.controller.setCamera(ribbonCamera);
+      sheet.pixel(50, 57, red, 'Camera changes preserve the deposited stroke');
+      let restoreSheet = await lose(sheet);
+      await restoreSheet();
+      sheet.pixel(50, 57, red, 'Context recovery reconstructs deposited paint');
+      sheet.controller.clear();
+      sheet.pixel(50, 50, blank, 'Clear discards deposited paint');
+      sheet.dispose();
+
+      const singleDab = fixture([{ pose: { x: 0.5 }, marker: brush }], {
+        camera: ribbonCamera, accumulate: false, paint: { maxSamples: 1 },
+      });
+      singleDab.pixel(75, 50, red, 'A stationary brush leaves a flat initial dab');
+      singleDab.pixel(83, 59, blank, 'The initial dab follows its circular footprint');
+      check(singleDab.controller.isPaintFull() && singleDab.controller.isPaused(), 'Single-dab budget does not pause correctly');
+      singleDab.controller.setCamera(camera);
+      singleDab.pixel(75, 50, blank, 'An initial dab has a retained 3D plane');
+      singleDab.dispose();
+
+      const limitedPaint = fixture([
+        { pose: { x: -0.8 }, marker: brush }, { pose: { x: -0.4 }, marker: brush },
+        { pose: { x: 0.4 }, marker: brush }, { pose: { x: 0.8 }, marker: brush },
+      ], { camera: ribbonCamera, accumulate: false, paint: { maxSamples: 3 } });
+      limitedPaint.advance(1); limitedPaint.advance(2);
+      limitedPaint.pixel(15, 50, red, 'The beginning of a brush stroke never expires');
+      limitedPaint.pixel(50, 50, red, 'The entire painted stroke is retained at the limit');
+      check(limitedPaint.controller.isPaintFull() && limitedPaint.controller.isPaused(), 'Paint limit did not stop animation');
+      const fullTime = limitedPaint.sampledTime;
+      limitedPaint.advance(3);
+      check(limitedPaint.sampledTime === fullTime, 'Full paint budget advanced motion');
+      limitedPaint.pixel(80, 50, blank, 'Painting cannot overwrite earlier samples after the cap');
+      limitedPaint.controller.clear();
+      check(!limitedPaint.controller.isPaintFull(), 'Clear did not replenish the paint budget');
+      limitedPaint.dispose();
+
+      const styledPaint = fixture([
+        { pose: { x: -0.8 }, marker: { ...brush, color: [1, 0, 0] } },
+        { pose: { x: -0.4 }, marker: { ...brush, color: [1, 0, 0] } },
+        { pose: { x: 0.4 }, marker: { ...brush, radius: 20, color: [0, 1, 0] } },
+      ], { camera: ribbonCamera, accumulate: false, paint: true });
+      styledPaint.advance(1); styledPaint.advance(2);
+      styledPaint.pixel(15, 50, red, 'Later brush colors do not recolor old paint');
+      styledPaint.pixel(15, 65, blank, 'A larger brush does not widen old paint');
+      styledPaint.pixel(65, 63, green, 'The deposited brush footprint retains its sampled shape and color');
+      styledPaint.dispose();
+
+      const crossingPaint = fixture([
+        { pose: { x: 0, y: 0 }, marker: { ...brush, color: [1, 0, 0] } },
+        { pose: { x: 0.6, y: 0 }, marker: { ...brush, color: [1, 0, 0] } },
+        { pose: { x: 0.6, y: 0.6 }, marker: { ...brush, color: [0, 1, 0] } },
+        { pose: { x: -0.6, y: -0.6 }, marker: { ...brush, color: [0, 1, 0] } },
+      ], { camera, accumulate: false, paint: true });
+      crossingPaint.advance(1); crossingPaint.advance(2); crossingPaint.advance(3);
+      crossingPaint.pixel(50, 50, green, 'New crossing paint covers an older starting cap at equal depth');
+      crossingPaint.dispose();
       for (const z of [4.5, -5]) {
         const clipped = fixture([{ pose: { z } }], { camera });
         clipped.pixel(50, 50, blank, `Camera near/far clipping at z=${z}`);
@@ -1062,12 +1521,13 @@ try {
       resized.canvas.width = 200;
       resized.canvas.height = 200;
       await Promise.resolve(); // Deliver bitmap attribute mutations while paused.
-      resized.pixel(25, 50, blank, 'Bitmap resize clears accumulated color and depth');
+      resized.pixel(25, 50, red, 'Bitmap resize redraws accumulated history');
       resized.pixel(75, 50, red, 'Bitmap resize repaints current paused marker');
       resized.canvas.style.width = '200px';
       resized.observers.resize();
       resized.pixel(75, 50, blank, 'CSS resize clears old projected marker');
       resized.pixel(150, 50, red, 'CSS resize reprojects current paused marker');
+      resized.pixel(50, 50, red, 'CSS resize reprojects older accumulated markers');
       check(resized.canvas.width === 200 && resized.canvas.height === 200 && resized.controller.isPaused(), 'Resize changed bitmap ownership or pause state');
       resized.dispose();
 
@@ -1111,7 +1571,7 @@ try {
       let restore = await lose(recovery);
       recovery.controller.resume();
       await restore();
-      recovery.pixel(25, 50, blank, 'Restored context discards accumulation');
+      recovery.pixel(25, 50, red, 'Restored context redraws accumulated history');
       recovery.pixel(75, 50, red, 'Restored context redraws current motion');
       check(!recovery.controller.isPaused() && recovery.scheduled === 1 && recovery.sampledTime === elapsed && recovery.resets === 0, 'Resume during context loss did not preserve current elapsed motion');
       recovery.step();
@@ -1144,7 +1604,44 @@ try {
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(failedAssets, []);
 
-  console.log('Browser smoke passed: 28 motion/renderer combinations, controls, consistent Lissajous/Duffing planar depth cue sizes, animated Lissajous size, example WebGL planar/spatial views, mouse/touch/keyboard camera orbit and capture cleanup, camera and appearance pause preservation, accumulation/clear/reset pixels, contain marker bounds, pause, reduced motion, fixed target sizes, transformed SVG, DOM/SVG overflow, WebGL pixels, depth, accumulation, bounded tails, clipping, camera, resize, and context recovery.');
+  const previewArgument = process.argv.indexOf('--preview-dir');
+  if (previewArgument !== -1) {
+    const previewDirectory = resolve(process.argv[previewArgument + 1]);
+    await mkdir(previewDirectory, { recursive: true });
+    // Keep screenshot contexts separate from the many WebGL stress fixtures.
+    const preview = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    await preview.emulateMedia({ reducedMotion: 'no-preference' });
+    await preview.goto(origin);
+    await preview.locator('#status').waitFor();
+    await preview.click('#pause');
+    await preview.selectOption('#motion', 'lorenz');
+    await preview.selectOption('#webgl-view', 'spatial');
+    await preview.locator('#webgl-lighting').check();
+    await preview.locator('#webgl-paint').check();
+    const animatePreview = async () => {
+      await preview.locator('#webgl-stage').scrollIntoViewIfNeeded();
+      await preview.click('#pause');
+      await preview.waitForFunction(() => Number(document.querySelector('#webgl-time').textContent) >= 0.6);
+      await preview.click('#pause');
+    };
+    await animatePreview();
+    await preview.evaluate(() => window.scrollTo(0, 0));
+    await preview.screenshot({ path: resolve(previewDirectory, 'webgl.png'), fullPage: true });
+    await preview.locator('#tab-dom').click();
+    await preview.selectOption('#fit', 'contain');
+    await preview.evaluate(() => window.scrollTo(0, 0));
+    await preview.screenshot({ path: resolve(previewDirectory, 'dom.png'), fullPage: true });
+    await preview.locator('#tab-webgl').click();
+    await preview.setViewportSize({ width: 375, height: 812 });
+    await preview.locator('#webgl-paint').uncheck();
+    await preview.locator('#webgl-paint').check();
+    await animatePreview();
+    await preview.evaluate(() => window.scrollTo(0, 0));
+    await preview.screenshot({ path: resolve(previewDirectory, 'mobile.png'), fullPage: true });
+    await preview.close();
+  }
+
+  console.log('Browser smoke passed: renderer tabs, keyboard activation, renderer-specific controls, alphabetic selects, desktop/mobile layouts, 28 motion/renderer combinations, and WebGL geometry/lighting/lifecycle pixels.');
 } finally {
   await browser?.close();
   await new Promise((resolveClose) => server.close(resolveClose));

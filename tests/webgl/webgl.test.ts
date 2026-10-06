@@ -6,10 +6,13 @@ import type { RuntimePlatform } from '../../src/runtime';
 
 type Operation = readonly [string, ...unknown[]];
 
-const fakeGL = () => {
+const fakeGL = (derivatives = true) => {
   const operations: Operation[] = [];
   let nextId = 1;
   let lost = false;
+  let boundBuffer: unknown;
+  let uploadedBuffer: unknown;
+  const buffers = new Map<unknown, Float32Array>();
   const value: Record<string, unknown> = {};
   const constants = [
     'VERTEX_SHADER', 'FRAGMENT_SHADER', 'COMPILE_STATUS', 'LINK_STATUS', 'ARRAY_BUFFER', 'STATIC_DRAW', 'DYNAMIC_DRAW', 'TRIANGLES',
@@ -17,6 +20,7 @@ const fakeGL = () => {
     'CLAMP_TO_EDGE', 'FRAMEBUFFER', 'COLOR_ATTACHMENT0', 'DEPTH_ATTACHMENT', 'RENDERBUFFER', 'FLOAT',
     'BLEND', 'SCISSOR_TEST', 'CULL_FACE', 'DEPTH_TEST', 'LEQUAL', 'TRIANGLE_STRIP', 'TEXTURE0',
     'MAX_TEXTURE_SIZE', 'MAX_RENDERBUFFER_SIZE', 'RGBA', 'UNSIGNED_BYTE', 'DEPTH_COMPONENT16',
+    'HIGH_FLOAT',
   ];
   constants.forEach((name, index) => { value[name] = index + 10; });
   Object.assign(value, { COLOR_BUFFER_BIT: 1, DEPTH_BUFFER_BIT: 2, FRAMEBUFFER_COMPLETE: 100 });
@@ -31,13 +35,23 @@ const fakeGL = () => {
     'shaderSource', 'compileShader', 'deleteShader', 'attachShader', 'detachShader', 'bindAttribLocation',
     'linkProgram', 'deleteProgram', 'deleteBuffer', 'deleteTexture', 'deleteRenderbuffer', 'deleteFramebuffer',
     'bindBuffer', 'bufferData', 'bindTexture', 'texParameteri', 'bindFramebuffer', 'framebufferTexture2D',
-    'framebufferRenderbuffer', 'enableVertexAttribArray', 'vertexAttribPointer', 'disable', 'colorMask',
+    'framebufferRenderbuffer', 'enableVertexAttribArray', 'disableVertexAttribArray', 'vertexAttribPointer', 'disable', 'colorMask',
     'viewport', 'depthMask', 'clearColor', 'clearDepth', 'clear', 'texImage2D', 'bindRenderbuffer',
     'renderbufferStorage', 'enable', 'depthFunc', 'useProgram', 'uniform3f', 'uniform2f', 'uniform1i',
     'drawArrays', 'activeTexture',
   ]) value[name] = (...args: unknown[]) => { operations.push([name, ...args]); };
+  value.bindBuffer = (target: number, buffer: unknown) => { boundBuffer = buffer; operations.push(['bindBuffer', target, buffer]); };
+  value.bufferData = (target: number, data: number | Float32Array, usage: number) => {
+    buffers.set(boundBuffer, typeof data === 'number' ? new Float32Array(data / 4) : new Float32Array(data));
+    operations.push(['bufferData', target, data, usage]);
+  };
   value.bufferSubData = (target: number, offset: number, data: Float32Array) => {
+    buffers.get(boundBuffer)?.set(data, offset / 4);
+    uploadedBuffer = boundBuffer;
     operations.push(['bufferSubData', target, offset, new Float32Array(data)]);
+  };
+  value.uniformMatrix4fv = (location: unknown, transpose: boolean, matrix: Float32Array) => {
+    operations.push(['uniformMatrix4fv', location, transpose, new Float32Array(matrix)]);
   };
   Object.assign(value, {
     getShaderParameter: () => true,
@@ -46,6 +60,8 @@ const fakeGL = () => {
     getParameter: () => 4096,
     checkFramebufferStatus: () => 100,
     isContextLost: () => lost,
+    getExtension: (name: string) => derivatives && name === 'OES_standard_derivatives' ? {} : null,
+    getShaderPrecisionFormat: () => ({ precision: 23 }),
   });
   return {
     value: value as unknown as WebGLRenderingContext,
@@ -55,6 +71,7 @@ const fakeGL = () => {
     failFramebuffer: () => { value.checkFramebufferStatus = () => -1; },
     setLost: (next: boolean) => { lost = next; },
     count: (name: string) => operations.filter(([operation]) => operation === name).length,
+    uploadedBuffer: () => Array.from(buffers.get(uploadedBuffer) ?? []),
   };
 };
 
@@ -276,7 +293,7 @@ describe('WebGL adapter', () => {
     controller.dispose();
   });
 
-  it('adds markers incrementally with stable GPU resources and clears independently of resetting motion', () => {
+  it('updates retained marker slots with stable GPU resources and clears independently of resetting motion', () => {
     const gl = fakeGL();
     const canvas = new Canvas(gl.value);
     const platform = new Platform();
@@ -289,11 +306,11 @@ describe('WebGL adapter', () => {
     });
     platform.fire(0);
     for (let index = 1; index <= 100; index++) platform.fire(index * 10);
-    expect(gl.count('clear')).toBe(1);
+    expect(gl.count('clear')).toBe(101);
     expect(gl.count('drawArrays')).toBe(202);
-    expect(gl.count('createProgram')).toBe(2);
+    expect(gl.count('createProgram')).toBe(3);
     expect(gl.count('createTexture')).toBe(1);
-    expect(gl.count('bufferData')).toBe(1);
+    expect((gl.operations.filter(([name]) => name === 'bufferSubData').at(-1)?.[3] as Float32Array).length).toBe(66);
     expect(gl.count('texImage2D')).toBe(1);
     const elapsed = latestTime;
     const drawings = gl.count('drawArrays');
@@ -306,15 +323,15 @@ describe('WebGL adapter', () => {
     controller.reset();
     expect(resets).toBe(1);
     expect(latestTime).toBe(0);
-    expect(gl.count('clear')).toBe(3);
+    expect(gl.count('clear')).toBe(103);
     controller.dispose();
     controller.dispose();
-    expect(gl.count('deleteProgram')).toBe(2);
-    expect(gl.count('deleteShader')).toBe(4);
+    expect(gl.count('deleteProgram')).toBe(3);
+    expect(gl.count('deleteShader')).toBe(6);
     expect(gl.count('deleteTexture')).toBe(1);
     expect(gl.count('deleteRenderbuffer')).toBe(1);
     expect(gl.count('deleteFramebuffer')).toBe(1);
-    expect(gl.count('deleteBuffer')).toBe(1);
+    expect(gl.count('deleteBuffer')).toBe(2);
     expect(platform.callbacks.size).toBe(0);
     expect(platform.resize).toBeUndefined();
     expect(platform.visibility).toBeUndefined();
@@ -332,7 +349,233 @@ describe('WebGL adapter', () => {
     controller.dispose();
   });
 
-  it('projects model coordinates in 3D and clears on camera, framing, CSS, and bitmap changes while paused', () => {
+  it('bounds accumulated markers and reprojects the entire history without adding paused samples', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const canvas = new Canvas(gl.value);
+    const color: [number, number, number] = [1, 0, 0];
+    const motion = { ...source(), sample: (time: number) => ({ state: time, pose: { x: time * 10 - 0.5, y: 0, z: 0 } }) };
+    const controller = animateWebGL(canvas.asElement(), motion, {
+      platform, accumulate: { maxSamples: 3 }, camera, framing: { fit: 'stretch' },
+      marker: () => ({ color, shape: 'square', radius: 4 }),
+    });
+    platform.fire(0);
+    for (let index = 1; index <= 4; index++) platform.fire(index * 100);
+    controller.pause();
+    const vertices = gl.uploadedBuffer();
+    expect(vertices).toHaveLength(3 * 6 * 11);
+    expect([0, 66, 132].map((start) => vertices[start]).sort()).toEqual([0.5, 1, 1.5]);
+    const draws = gl.count('drawArrays');
+    const uploadsBeforeOrbit = gl.count('bufferSubData');
+    const projectionBefore = gl.operations.filter(([operation]) => operation === 'uniformMatrix4fv').at(-1)?.[3];
+    controller.setCamera({ ...camera, position: { x: 10, y: 0, z: 0 } });
+    const rotated = gl.uploadedBuffer();
+    expect(rotated).toEqual(vertices); // Retained XYZ stays fixed; only the projection changes.
+    expect(gl.count('bufferSubData')).toBe(uploadsBeforeOrbit);
+    expect(gl.operations.filter(([operation]) => operation === 'uniformMatrix4fv').at(-1)?.[3]).not.toEqual(projectionBefore);
+    expect(gl.count('drawArrays')).toBe(draws + 3); // Two wrapped ranges plus presentation.
+    expect(controller.isPaused()).toBe(true);
+    loss(canvas, gl);
+    restore(canvas, gl);
+    expect(gl.uploadedBuffer().filter((_, index) => index % 66 === 0).sort()).toEqual([0.5, 1, 1.5]);
+    controller.clear();
+    controller.setCamera(camera);
+    expect(gl.count('drawArrays')).toBeGreaterThan(draws); // The new current marker is redrawn.
+    controller.dispose();
+  });
+
+  it('validates accumulation limits before allocating resources', () => {
+    for (const maxSamples of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      const gl = fakeGL();
+      expect(() => animateWebGL(new Canvas(gl.value).asElement(), source(), {
+        platform: new Platform(), accumulate: { maxSamples },
+      })).toThrow(RangeError);
+      expect(gl.count('createProgram')).toBe(0);
+    }
+  });
+
+  it('paints with the marker footprint, preserves the whole stroke, and pauses at the paint limit', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const canvas = new Canvas(gl.value);
+    let limits = 0;
+    const controller = animateWebGL(canvas.asElement(), source(), {
+      platform, paint: { maxSamples: 4 }, camera,
+      marker: { shape: 'circle', radius: 5 }, onPaintLimit: () => { limits++; },
+    });
+    platform.fire(0);
+    for (let index = 1; index <= 4; index++) platform.fire(index * 100);
+    expect(controller.isPaintFull()).toBe(true);
+    expect(controller.isPaused()).toBe(true);
+    expect(limits).toBe(1);
+    const positions = gl.operations.filter(([name]) => name === 'bufferSubData').at(-1)?.[3] as Float32Array;
+    const ys = Array.from(positions).filter((_, index) => index % 9 === 1);
+    expect(Math.max(...ys) - Math.min(...ys)).toBeCloseTo(0.4); // radius 5 × pose.depth 2 gives 20 CSS pixels.
+    const uploads = gl.count('bufferSubData');
+    const draws = gl.count('drawArrays');
+    controller.setCamera({ ...camera, position: { x: 0, y: -10, z: 0 }, up: { x: 0, y: 0, z: 1 } });
+    expect(gl.count('bufferSubData')).toBe(uploads);
+    expect(gl.count('drawArrays')).toBe(draws + 2); // Continuous surface and endpoint caps, then presentation.
+    controller.resume();
+    expect(platform.callbacks.size).toBe(0); // Full paint cannot silently discard its beginning.
+    loss(canvas, gl); restore(canvas, gl);
+    expect(controller.isPaintFull()).toBe(true);
+    expect(controller.isPaused()).toBe(true);
+    controller.clear();
+    expect(controller.isPaintFull()).toBe(false);
+    controller.resume();
+    platform.fire(1000); platform.fire(1100);
+    expect(gl.count('bufferSubData')).toBeGreaterThan(uploads);
+    controller.dispose();
+    expect(gl.count('deleteBuffer')).toBe(2);
+  });
+
+  it('paints independently of marker shape and rejects invalid brushes', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), { platform, paint: true, marker: { shape: 'circle' } });
+    platform.fire(0); platform.fire(100);
+    expect(uploadedTrail(gl)).toHaveLength(216); // Two samples, each with surface and endpoint geometry.
+    controller.dispose();
+    for (const marker of [
+      { shape: 'circle' as const, radius: -1 }, { shape: 'circle' as const, radius: NaN },
+      { shape: 'circle' as const, color: [1, -1, 0] as const },
+    ]) {
+      expect(() => animateWebGL(new Canvas(fakeGL().value).asElement(), source(), { platform: new Platform(), paint: true, marker })).toThrow();
+    }
+    expect(() => animateWebGL(new Canvas(fakeGL().value).asElement(), source(), {
+      platform: new Platform(), trail: true, paint: true, marker: { shape: 'circle' },
+    })).toThrow(/cannot be combined/);
+  });
+
+  it('lifts the brush when contain padding collapses a tiny viewport without losing paint or faulting', () => {
+    const gl = fakeGL();
+    const canvas = new Canvas(gl.value);
+    canvas.cssWidth = canvas.cssHeight = 20;
+    const platform = new Platform();
+    const controller = animateWebGL(canvas.asElement(), source(), {
+      platform, paint: true, framing: { fit: 'contain' }, marker: { shape: 'circle' },
+    });
+    platform.fire(0); platform.fire(100);
+    expect(gl.count('bufferSubData')).toBe(0);
+    canvas.cssWidth = 200; canvas.cssHeight = 100;
+    platform.resize?.();
+    platform.fire(200); platform.fire(300);
+    expect(gl.count('bufferSubData')).toBeGreaterThan(0);
+    controller.dispose();
+  });
+
+  it('deposits identical world-space paint while moving with a fixed or rotating camera', () => {
+    const create = () => {
+      const gl = fakeGL();
+      const platform = new Platform();
+      const motion = { ...source(), sample: (time: number) => ({ state: time, pose: { x: 3 * time, y: 5 * time, z: 7 * time } }) };
+      const controller = animateWebGL(new Canvas(gl.value).asElement(), motion, {
+        platform, camera, paint: true, marker: { radius: 5 },
+      });
+      return { gl, platform, controller };
+    };
+    const fixed = create();
+    const orbiting = create();
+    for (const target of [fixed, orbiting]) { target.platform.fire(0); target.platform.fire(100); }
+    orbiting.controller.setCamera({ ...camera, position: { x: 7, y: -7, z: 3 }, up: { x: 0, y: 0, z: 1 } });
+    for (const target of [fixed, orbiting]) target.platform.fire(200);
+    const positions = (gl: ReturnType<typeof fakeGL>) => gl.operations.filter(([name]) => name === 'bufferSubData').at(-1)?.[3];
+    expect(positions(orbiting.gl)).toEqual(positions(fixed.gl));
+    orbiting.controller.setFraming({ fit: 'contain', zoom: 2 });
+    for (const target of [fixed, orbiting]) target.platform.fire(300);
+    expect(positions(orbiting.gl)).toEqual(positions(fixed.gl));
+    fixed.controller.dispose(); orbiting.controller.dispose();
+  });
+
+  it('changes future brush footprints from circle to square without replacing paint or resetting motion', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    let shape: 'circle' | 'square' = 'circle';
+    let time = 0;
+    const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+      platform, paint: true, marker(frame) { time = frame.elapsedSeconds; return { shape }; },
+    });
+    platform.fire(0); platform.fire(100); controller.pause();
+    const elapsed = time;
+    const uploads = gl.count('bufferSubData');
+    shape = 'square';
+    controller.setFraming({ fit: 'stretch' });
+    expect(time).toBe(elapsed);
+    expect(gl.count('bufferSubData')).toBe(uploads);
+    expect(gl.operations.filter(([name, uniform]) => name === 'uniform3f' && uniform === 'color')).toHaveLength(0); // No separate head marker.
+    expect(controller.isPaused()).toBe(true);
+    controller.resume(); platform.fire(200); platform.fire(300);
+    const footprints = gl.uploadedBuffer();
+    expect(footprints[54 + 8]).toBe(1); // Captured circular starting cap.
+    expect(footprints[108 + 54 + 6]).toBe(0); // Intermediate cap is collapsed.
+    expect(footprints[216 + 54 + 6]).toBe(-1); // Leading cap is still present.
+    expect(footprints[216 + 54 + 8]).toBe(0); // Newly selected square brush.
+    controller.dispose();
+  });
+
+  it('toggles lighting on retained drawing while paused without changing samples, colors, size, or GPU buffers', () => {
+    for (const mode of [{ accumulate: true }, { paint: true }, { trail: true }, {}]) {
+      const gl = fakeGL();
+      const platform = new Platform();
+      let time = 0;
+      const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+        platform, camera, ...mode,
+        marker(frame) { time = frame.elapsedSeconds; return { radius: 7, color: [0.2, 0.5, 0.8] }; },
+      });
+      platform.fire(0); platform.fire(100); controller.pause();
+      const elapsed = time;
+      const uploads = gl.count('bufferSubData');
+      const allocations = gl.count('bufferData');
+      const geometry = gl.uploadedBuffer();
+      controller.setLighting(true);
+      expect(gl.operations).toContainEqual(['uniform1i', 'lightingEnabled', 1]);
+      expect(time).toBe(elapsed);
+      expect(gl.count('bufferSubData')).toBe(uploads);
+      expect(gl.count('bufferData')).toBe(allocations);
+      expect(gl.uploadedBuffer()).toEqual(geometry);
+      expect(controller.isPaused()).toBe(true);
+      controller.setLighting(false);
+      expect(gl.operations).toContainEqual(['uniform1i', 'lightingEnabled', 0]);
+      controller.dispose();
+    }
+  });
+
+  it('keeps lighting choices through context recovery and supports depth-cue fallback without derivatives', () => {
+    for (const derivatives of [true, false]) {
+      const gl = fakeGL(derivatives);
+      const canvas = new Canvas(gl.value);
+      const platform = new Platform();
+      const controller = animateWebGL(canvas.asElement(), source(), { platform, paint: true, camera });
+      platform.fire(0); platform.fire(100); controller.pause();
+      loss(canvas, gl);
+      controller.setLighting(true);
+      restore(canvas, gl);
+      expect(gl.operations).toContainEqual(['uniform1i', 'lightingEnabled', 1]);
+      expect(controller.isPaused()).toBe(true);
+      const fragmentSources = gl.operations.filter(([name, , source]) => name === 'shaderSource' && String(source).includes('vec4 shade'));
+      expect(fragmentSources.length).toBeGreaterThan(0);
+      for (const [, , source] of fragmentSources) {
+        expect(String(source).includes('dFdx')).toBe(derivatives);
+        expect(String(source).includes('#extension GL_OES_standard_derivatives')).toBe(derivatives);
+      }
+      controller.dispose();
+    }
+  });
+
+  it('rejects invalid lighting settings before allocating resources or changing a live view', () => {
+    const gl = fakeGL();
+    expect(() => animateWebGL(new Canvas(gl.value).asElement(), source(), {
+      platform: new Platform(), lighting: 'yes' as unknown as boolean,
+    })).toThrow(/boolean/);
+    expect(gl.count('createProgram')).toBe(0);
+    const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), { platform: new Platform(), autoplay: false });
+    expect(() => controller.setLighting('yes' as unknown as boolean)).toThrow(/boolean/);
+    expect(controller.isPaused()).toBe(true);
+    controller.dispose();
+  });
+
+  it('reprojects accumulated model coordinates on camera, framing, CSS, and bitmap changes while paused', () => {
     const gl = fakeGL();
     const platform = new Platform();
     const canvas = new Canvas(gl.value);
@@ -349,20 +592,22 @@ describe('WebGL adapter', () => {
     mutableCamera.position.z = 100;
     platform.resize?.();
     expect(frame.position.visibilityDepth).toBe(0.2); // snapshot configuration
-    expect(gl.count('clear')).toBe(1);
+    expect(gl.count('clear')).toBe(2);
     controller.setCamera({ ...camera, position: { x: 0, y: 0, z: 15 } });
     expect(frame.position.visibilityDepth).toBe(0.45);
-    expect(gl.count('clear')).toBe(2);
+    expect(gl.count('clear')).toBe(3);
+    expect(gl.operations.filter(([operation]) => operation === 'clear').at(-1)).toEqual(['clear', gl.value.COLOR_BUFFER_BIT | gl.value.DEPTH_BUFFER_BIT]);
     controller.setFraming({ fit: 'stretch', offsetX: 0.1 });
     expect(frame.position.x).toBe(170);
-    expect(gl.count('clear')).toBe(3);
+    expect(gl.count('clear')).toBe(4);
+    expect(gl.operations.filter(([operation]) => operation === 'clear').at(-1)).toEqual(['clear', gl.value.COLOR_BUFFER_BIT | gl.value.DEPTH_BUFFER_BIT]);
     canvas.cssWidth = 300;
     platform.resize?.();
-    expect(gl.count('clear')).toBe(4);
+    expect(gl.count('clear')).toBe(5);
     expect(gl.count('texImage2D')).toBe(1);
     canvas.width = 600;
     platform.resize?.();
-    expect(gl.count('clear')).toBe(5);
+    expect(gl.count('clear')).toBe(6);
     expect(gl.count('texImage2D')).toBe(2);
     expect(gl.count('createTexture')).toBe(1);
     expect(controller.isPaused()).toBe(true);
@@ -406,7 +651,7 @@ describe('WebGL adapter', () => {
     expect(time).toBe(elapsed);
     expect(controller.isPaused()).toBe(true);
     expect(platform.callbacks.size).toBe(0);
-    expect(gl.count('createProgram')).toBe(4);
+    expect(gl.count('createProgram')).toBe(5);
     controller.resume();
     platform.fire(10000); platform.fire(10010);
     expect(time).toBeCloseTo(elapsed + 0.01);

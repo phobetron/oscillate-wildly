@@ -1,10 +1,11 @@
 import { projectOrthographic, validateOrthographicCamera } from '../core';
-import type { Framing, MotionSource, OrthographicCamera, Point3D, Pose, ProjectedPose } from '../core';
+import type { Framing, MotionSource, OrthographicCamera, Point3D, Pose, ProjectedPose, Viewport } from '../core';
 import { createController } from '../runtime';
 import type { Controller, Frame, RuntimePlatform } from '../runtime';
 import { createTrailHistory } from '../runtime/trail';
 import { createMarkerRenderer } from './renderer';
-import type { WebGLMarkerOptions, WebGLTrailStyle } from './renderer';
+import type { WebGLMarker, WebGLMarkerOptions, WebGLTrailStyle } from './renderer';
+import { createRibbonBrush } from './ribbon';
 
 export type { WebGLColor, WebGLMarkerOptions } from './renderer';
 
@@ -25,13 +26,29 @@ export interface WebGLTrailOptions extends WebGLTrailStyle {
   readonly color?: WebGLTrailStyle['color'];
 }
 
+export interface WebGLAccumulationOptions {
+  /** Maximum retained markers. Positive safe integer; defaults to 12000. Oldest markers expire at the limit. */
+  readonly maxSamples?: number;
+}
+
+export interface WebGLPaintOptions {
+  /** Maximum brush samples before painting pauses. Defaults to 12000. Earlier paint is preserved. */
+  readonly maxSamples?: number;
+}
+
 export interface AnimateWebGLOptions<State> {
   readonly framing?: Framing;
   readonly autoplay?: boolean;
   /** Defaults to true, as with the Canvas adapter. */
   readonly offscreen?: boolean;
-  /** Retain color and hardware depth between frames. Defaults to false. */
-  readonly accumulate?: boolean;
+  /** Shade all drawing at render time with surface lighting and a depth cue. Defaults to false (flat base colors). */
+  readonly lighting?: boolean;
+  /** Retain bounded world-space markers, including across view changes. true uses defaults. Defaults to false. */
+  readonly accumulate?: boolean | WebGLAccumulationOptions;
+  /** Paint a connected ribbon using the marker footprint, independently of marker shape. Exclusive with trail and accumulate. */
+  readonly paint?: boolean | WebGLPaintOptions;
+  /** Called once when a ribbon brush fills its sample budget and pauses. Clear or reset starts a new budget. */
+  readonly onPaintLimit?: () => void;
   /** Bounded, opaque connected tail. true uses defaults. Cannot be combined with accumulate. */
   readonly trail?: boolean | WebGLTrailOptions;
   /** Opaque marker appearance, evaluated with the current projected frame. null skips drawing. */
@@ -46,10 +63,14 @@ export interface AnimateWebGLOptions<State> {
 }
 
 export interface WebGLController extends Controller {
-  /** Clear color, depth, and tail history immediately, without resetting or redrawing the motion. */
+  /** Whether deposited ribbon paint has filled its sample budget. */
+  isPaintFull(): boolean;
+  /** Clear all drawing and retained history immediately, without resetting or redrawing the motion. */
   clear(): void;
-  /** Reproject the marker and retained tail, clearing accumulation and preserving motion/pause. undefined returns to planar mode. */
+  /** Reproject all retained drawing without changing motion/pause. undefined returns to planar mode. */
   setCamera(camera: OrthographicCamera | undefined): void;
+  /** Change shading and redraw retained geometry without changing motion, samples, or pause state. */
+  setLighting(enabled: boolean): void;
 }
 
 const snapshotCamera = (camera: OrthographicCamera | undefined): OrthographicCamera | undefined => {
@@ -64,10 +85,30 @@ const snapshotCamera = (camera: OrthographicCamera | undefined): OrthographicCam
   };
 };
 
+const writeProjectionMatrix = (
+  project: (pose: Pose) => WebGLProjectedPose,
+  viewport: Viewport,
+  matrix: Float32Array,
+): void => {
+  // An affine projection is determined by the origin and three basis vectors.
+  const zero = project({ x: 0, y: 0, z: 0 });
+  const axes = [project({ x: 1, y: 0, z: 0 }), project({ x: 0, y: 1, z: 0 }), project({ x: 0, y: 0, z: 1 })];
+  axes.forEach((axis, index) => {
+    matrix[index * 4] = (axis.x - zero.x) * 2 / viewport.width;
+    matrix[index * 4 + 1] = (zero.y - axis.y) * 2 / viewport.height;
+    matrix[index * 4 + 2] = (axis.visibilityDepth - zero.visibilityDepth) * 2;
+    matrix[index * 4 + 3] = 0;
+  });
+  matrix[12] = zero.x * 2 / viewport.width - 1;
+  matrix[13] = 1 - zero.y * 2 / viewport.height;
+  matrix[14] = zero.visibilityDepth * 2 - 1;
+  matrix[15] = 1;
+};
+
 /**
  * Draw opaque camera-facing markers and optional tails using WebGL 1.
- * Owns the canvas's GL context, never its CSS or bitmap dimensions. A persistent
- * framebuffer keeps accumulation independent of browser drawing-buffer clears.
+ * Owns the canvas's GL context, never its CSS or bitmap dimensions. Retained
+ * world-space geometry is redrawn through the current camera on every frame.
  */
 export const animateWebGL = <State>(
   canvas: HTMLCanvasElement,
@@ -76,8 +117,20 @@ export const animateWebGL = <State>(
 ): WebGLController => {
   const trail = options.trail ? options.trail === true ? {} : options.trail : undefined;
   const history = trail ? createTrailHistory<{ pose: Pose; visibilityDepth: number }>(trail.maxSamples) : undefined;
+  const accumulation = options.accumulate ? options.accumulate === true ? {} : options.accumulate : undefined;
+  const paint = options.paint ? options.paint === true ? {} : options.paint : undefined;
+  if ([trail, accumulation, paint].filter(Boolean).length > 1) throw new TypeError('WebGL trail, accumulate, and paint cannot be combined');
+  const accumulationLimit = accumulation?.maxSamples ?? 12000;
+  const ribbon = paint ? createRibbonBrush(paint.maxSamples) : undefined;
+  let previousBrushPose: Pose | undefined;
+  let brushBasis: { x: number[]; y: number[]; xx: number; yy: number; xy: number; determinant: number } | undefined;
+  let currentBrush = false;
+  const markers = accumulation ? createTrailHistory<WebGLMarker>(accumulationLimit) : undefined;
+  const markerProjection = new Float32Array(16);
+  let previousMarkerTime: number | undefined;
+  let previousMarker: WebGLMarker | undefined;
+  let markerRendererNeedsRestore = true;
   if (trail) {
-    if (options.accumulate) throw new TypeError('WebGL trail and accumulate cannot be combined');
     if (!Number.isFinite(trail.width ?? 1) || (trail.width ?? 1) < 0) {
       throw new RangeError('WebGL trail width must be finite and non-negative');
     }
@@ -86,9 +139,13 @@ export const animateWebGL = <State>(
       throw new RangeError('WebGL trail color must contain three RGB channels in [0, 1]');
     }
   }
-  const clearTrail = (): void => { history?.clear(); };
+  const clearHistory = (): void => {
+    history?.clear(); markers?.clear(); ribbon?.clear(); previousBrushPose = undefined; brushBasis = undefined; previousMarkerTime = undefined; previousMarker = undefined; markerRendererNeedsRestore = true;
+  };
   let camera = snapshotCamera(options.camera);
   let framing = options.framing ?? {};
+  let lighting = options.lighting ?? false;
+  if (typeof lighting !== 'boolean') throw new TypeError('WebGL lighting must be a boolean');
   const gl = canvas.getContext('webgl', { alpha: true, depth: true, antialias: false });
   if (!gl) throw new TypeError('canvas must provide a WebGL rendering context');
 
@@ -96,8 +153,6 @@ export const animateWebGL = <State>(
   let controller: Controller | undefined;
   let disposed = false;
   let lost = gl.isContextLost();
-  let invalidated = true;
-  let viewKey: string | undefined;
   let stopDimensions = (): void => undefined;
 
   const measureViewport = () => {
@@ -110,7 +165,7 @@ export const animateWebGL = <State>(
   const cleanup = (): void => {
     if (disposed) return;
     disposed = true;
-    clearTrail();
+    clearHistory();
     stopDimensions();
     renderer?.dispose();
     renderer = undefined;
@@ -126,7 +181,7 @@ export const animateWebGL = <State>(
       autoplay: options.autoplay,
       offscreen: options.offscreen ?? true,
       platform: options.platform,
-      onReset: () => { invalidated = true; clearTrail(); },
+      onReset: clearHistory,
       onDispose: cleanup,
       observeAvailability(notify) {
         const onLost = (event: Event): void => {
@@ -134,7 +189,7 @@ export const animateWebGL = <State>(
           lost = true;
           // Lost-context resources are invalidated by the browser; drop all handles.
           renderer = undefined;
-          invalidated = true;
+          markerRendererNeedsRestore = true;
           notify(false);
         };
         const onRestored = (): void => {
@@ -142,7 +197,7 @@ export const animateWebGL = <State>(
           try {
             renderer = createMarkerRenderer(gl);
             lost = false;
-            invalidated = true;
+            markerRendererNeedsRestore = true;
             notify(true);
           } catch (error) {
             controller?.dispose();
@@ -155,7 +210,6 @@ export const animateWebGL = <State>(
         // and the animation is paused (ResizeObserver alone does not cover them).
         const observer = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(() => {
           if (disposed) return;
-          invalidated = true;
           if (!lost) {
             try { notify(true); }
             catch (error) { controller?.dispose(); throw error; }
@@ -181,19 +235,45 @@ export const animateWebGL = <State>(
           : { ...frame.project(point), visibilityDepth: planarDepth };
         const position = project(pose);
         const webglFrame: WebGLFrame<State> = { ...frame, pose, position, project };
-        const origin = project({ x: 0, y: 0, z: 0 });
-        const diagonal = project({ x: 1, y: 1, z: 0 });
-        const key = JSON.stringify([
-          canvas.width, canvas.height, frame.viewport.width, frame.viewport.height,
-          origin.x, origin.y, diagonal.x, diagonal.y,
-        ]);
         const resized = renderer.resize(canvas.width, canvas.height);
-        if (!options.accumulate || invalidated || key !== viewKey || resized) {
-          if (!resized) renderer.clear();
-        }
-        viewKey = key;
-        invalidated = false;
+        const scaleX = Math.abs(position.scaleX);
+        const scaleY = Math.abs(position.scaleY);
+        renderer.setLighting(lighting, [
+          scaleX > 0 ? frame.viewport.width / canvas.width / scaleX : 1,
+          scaleY > 0 ? frame.viewport.height / canvas.height / scaleY : 1,
+          camera ? (camera.far ?? 100) - (camera.near ?? 0.1) : 1,
+        ]);
         const marker = typeof options.marker === 'function' ? options.marker(webglFrame) : options.marker ?? {};
+        currentBrush = paint !== undefined && marker !== null;
+        const retainedMarker: WebGLMarker | undefined = markers && marker !== null && !currentBrush ? {
+          pose: { ...pose }, visibilityDepth: planarDepth,
+          options: { radius: marker.radius ?? 5, shape: marker.shape ?? 'circle', color: [...(marker.color ?? [1, 0, 0])] as [number, number, number] },
+        } : undefined;
+        const sameMarkerTime = frame.elapsedSeconds === previousMarkerTime;
+        const markerChanged = retainedMarker !== undefined && (!sameMarkerTime || !previousMarker
+          || retainedMarker.pose.x !== previousMarker.pose.x || retainedMarker.pose.y !== previousMarker.pose.y
+          || (retainedMarker.pose.z ?? 0) !== (previousMarker.pose.z ?? 0)
+          || (retainedMarker.pose.depth ?? 1) !== (previousMarker.pose.depth ?? 1)
+          || retainedMarker.visibilityDepth !== previousMarker.visibilityDepth
+          || retainedMarker.options.radius !== previousMarker.options.radius || retainedMarker.options.shape !== previousMarker.options.shape
+          || retainedMarker.options.color!.length !== previousMarker.options.color!.length
+          || retainedMarker.options.color!.some((channel, index) => channel !== previousMarker!.options.color![index]));
+        const replacingMarker = markerChanged && sameMarkerTime;
+        if (!resized) renderer.clear();
+        if (markers && retainedMarker && markerChanged) {
+          if (![pose.x, pose.y, pose.z ?? 0, planarDepth].every(Number.isFinite)) {
+            throw new RangeError('WebGL accumulated coordinates and visibility depth must be finite');
+          }
+          markers.add(retainedMarker, frame.elapsedSeconds);
+          previousMarkerTime = frame.elapsedSeconds;
+          previousMarker = retainedMarker;
+        }
+        if (markers) {
+          if (markerRendererNeedsRestore) {
+            renderer.setMarkers(markers.values(), accumulationLimit);
+            markerRendererNeedsRestore = false;
+          } else if (retainedMarker && markerChanged) renderer.addMarker(retainedMarker, accumulationLimit, replacingMarker);
+        }
         if (trail && history) {
           if (![pose.x, pose.y, pose.z ?? 0, planarDepth].every(Number.isFinite)) {
             throw new RangeError('WebGL trail coordinates and visibility depth must be finite');
@@ -205,7 +285,77 @@ export const animateWebGL = <State>(
           });
           renderer.drawTrail(positions, frame.viewport, { width: trail.width, color: trail.color ?? marker?.color });
         }
-        if (marker !== null) renderer.draw(position, position.visibilityDepth, frame.viewport, marker);
+        if (ribbon && currentBrush && marker !== null) {
+          const radius = (marker.radius ?? 5) * (pose.depth ?? 1);
+          if (!Number.isFinite(radius) || radius < 0 || (marker.radius ?? 5) < 0 || (pose.depth ?? 1) < 0) {
+            throw new RangeError('WebGL brush radius and depth must be finite and non-negative');
+          }
+          // Calibrate the brush in its starting view once per stroke. Keep
+          // this basis for future samples so camera motion cannot twist paint.
+          if (!brushBasis) {
+            const origin = project({ x: 0, y: 0, z: 0 });
+            const axes = [project({ x: 1, y: 0, z: 0 }), project({ x: 0, y: 1, z: 0 }), project({ x: 0, y: 0, z: 1 })];
+            const x = axes.map((axis) => axis.x - origin.x);
+            const y = axes.map((axis) => axis.y - origin.y);
+            const xx = x.reduce((sum, value) => sum + value * value, 0);
+            const yy = y.reduce((sum, value) => sum + value * value, 0);
+            const xy = x.reduce((sum, value, index) => sum + value * y[index], 0);
+            const determinant = xx * yy - xy * xy;
+            if (Number.isFinite(determinant) && determinant > 0) brushBasis = { x, y, xx, yy, xy, determinant };
+          }
+          const delta = previousBrushPose ? [pose.x - previousBrushPose.x, pose.y - previousBrushPose.y, (pose.z ?? 0) - (previousBrushPose.z ?? 0)] : [0, 0, 0];
+          const dx = brushBasis?.x.reduce((sum, value, index) => sum + value * delta[index], 0) ?? 0;
+          const dy = brushBasis?.y.reduce((sum, value, index) => sum + value * delta[index], 0) ?? 0;
+          const length = Math.hypot(dx, dy);
+          const nx = length > 0 ? -dy / length : 0;
+          const ny = length > 0 ? dx / length : 1;
+          if (brushBasis && radius > 0) {
+            const { x, y, xx, yy, xy, determinant } = brushBasis;
+            const a = (yy * nx - xy * ny) / determinant;
+            const b = (xx * ny - xy * nx) / determinant;
+            const side = { x: x[0] * a + y[0] * b, y: x[1] * a + y[1] * b, z: x[2] * a + y[2] * b };
+            const worldPerPixel = Math.hypot(side.x, side.y, side.z);
+            const wasFull = ribbon.full;
+            const footprint = marker.shape === 'square' ? Math.abs(nx) + Math.abs(ny) : 1;
+            const axisX = x.map((value, index) => radius * (value * yy - y[index] * xy) / determinant);
+            const axisY = y.map((value, index) => radius * (value * xx - x[index] * xy) / determinant);
+            ribbon.add(pose, frame.elapsedSeconds, 2 * radius * worldPerPixel * footprint, side, marker.color ?? [1, 0, 0], {
+              shape: marker.shape ?? 'circle',
+              axisX: { x: axisX[0], y: axisX[1], z: axisX[2] },
+              axisY: { x: axisY[0], y: axisY[1], z: axisY[2] },
+            });
+            previousBrushPose = { ...pose };
+            if (ribbon.full) {
+              controller?.pause();
+              if (!wasFull) options.onPaintLimit?.();
+            }
+          } else {
+            // Contain padding can collapse a tiny viewport to zero drawable
+            // scale. Lift the brush instead of inverting a singular mapping.
+            ribbon.breakStroke();
+            previousBrushPose = undefined;
+            brushBasis = undefined;
+          }
+        } else {
+          ribbon?.breakStroke();
+          previousBrushPose = undefined;
+          brushBasis = undefined;
+        }
+        if (ribbon && ribbon.footprints.count > 0) {
+          writeProjectionMatrix(project, frame.viewport, markerProjection);
+          renderer.drawPaintFootprints(ribbon.footprints, frame.viewport, markerProjection);
+        }
+        if (markers) {
+          if (markers.size === 1 && previousMarker) {
+            const retained = previousMarker;
+            const projected = project(retained.pose);
+            renderer.draw(projected, camera ? projected.visibilityDepth : retained.visibilityDepth, frame.viewport, retained.options);
+          } else if (markers.size > 1) {
+            const projectVertex = (point: Pose) => camera ? project(point) : { ...frame.project(point), visibilityDepth: point.z ?? 0 };
+            writeProjectionMatrix(projectVertex, frame.viewport, markerProjection);
+            renderer.drawMarkers(frame.viewport, markerProjection, !camera);
+          }
+        } else if (marker !== null && !paint) renderer.draw(position, position.visibilityDepth, frame.viewport, marker);
         renderer.present();
       },
     });
@@ -215,28 +365,36 @@ export const animateWebGL = <State>(
   }
 
   const runtime = controller;
+  if (currentBrush && ribbon?.full) runtime.pause();
   return {
     ...runtime,
+    isPaintFull: () => ribbon?.full ?? false,
+    resume() { if (!currentBrush || !ribbon?.full) runtime.resume(); },
     setFraming(nextFraming) {
       if (disposed) return;
       const previous = framing;
       framing = nextFraming;
-      invalidated = true;
       try { runtime.setFraming(nextFraming); }
-      catch (error) { framing = previous; invalidated = true; throw error; }
+      catch (error) { framing = previous; throw error; }
     },
     setCamera(nextCamera) {
       if (disposed) return;
       const previous = camera;
       camera = snapshotCamera(nextCamera);
-      invalidated = true;
       try { runtime.setFraming(framing); }
-      catch (error) { camera = previous; invalidated = true; throw error; }
+      catch (error) { camera = previous; throw error; }
+    },
+    setLighting(enabled) {
+      if (disposed) return;
+      if (typeof enabled !== 'boolean') throw new TypeError('WebGL lighting must be a boolean');
+      const previous = lighting;
+      lighting = enabled;
+      try { runtime.setFraming(framing); }
+      catch (error) { lighting = previous; throw error; }
     },
     clear() {
       if (disposed) return;
-      clearTrail();
-      invalidated = true;
+      clearHistory();
       if (lost || !renderer || canvas.width === 0 || canvas.height === 0) return;
       renderer.resize(canvas.width, canvas.height);
       renderer.clear();

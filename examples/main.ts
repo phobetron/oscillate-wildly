@@ -81,7 +81,21 @@ const required = <ElementType extends Element>(selector: string): ElementType =>
 };
 
 const motionSelect = required<HTMLSelectElement>('#motion');
-const rendererSelect = required<HTMLSelectElement>('#renderer');
+const rendererNames: readonly RendererName[] = ['webgl', 'canvas', 'dom', 'svg'];
+let selectedRenderer: RendererName = 'webgl';
+const rendererTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('[role=tab][data-renderer]'));
+const rendererPanels = rendererNames.map((name) => required<HTMLElement>(`#panel-${name}`));
+const tablist = required<HTMLElement>('[role=tablist]');
+const librarySettings = required<HTMLElement>('#library-settings');
+const previewControls = required<HTMLElement>('#preview-controls');
+const markerConfig = required<HTMLFieldSetElement>('#marker-config');
+const nativeMarkerSlot = required<HTMLElement>('#native-marker-slot');
+const presentationMarkerSlot = required<HTMLElement>('#presentation-marker-slot');
+const historyConfig = required<HTMLElement>('#history-config');
+const cameraConfig = required<HTMLElement>('#camera-config');
+const shadingConfig = required<HTMLElement>('#shading-config');
+const pathControl = required<HTMLElement>('#path-control');
+const cameraPresetControl = required<HTMLElement>('#camera-preset-control');
 const fitSelect = required<HTMLSelectElement>('#fit');
 const zoomInput = required<HTMLInputElement>('#zoom');
 const zoomValue = required<HTMLOutputElement>('#zoom-value');
@@ -101,8 +115,10 @@ const visualNote = required<HTMLElement>('#visual-note');
 const webglView = required<HTMLSelectElement>('#webgl-view');
 const webglCamera = required<HTMLSelectElement>('#webgl-camera');
 const webglShape = required<HTMLSelectElement>('#webgl-shape');
-const webglColorMode = required<HTMLSelectElement>('#webgl-color-mode');
+const webglLighting = required<HTMLInputElement>('#webgl-lighting');
 const webglAccumulate = required<HTMLInputElement>('#webgl-accumulate');
+const webglPaint = required<HTMLInputElement>('#webgl-paint');
+const accumulationLengthInput = required<HTMLInputElement>('#accumulation-length');
 const clearDrawingButton = required<HTMLButtonElement>('#clear-drawing');
 const webglNote = required<HTMLElement>('#webgl-note');
 const webglReadout = required<HTMLElement>('#webgl-frame');
@@ -121,7 +137,7 @@ const pauseButton = required<HTMLButtonElement>('#pause');
 const resetButton = required<HTMLButtonElement>('#reset');
 const defaultsButton = required<HTMLButtonElement>('#defaults');
 const status = required<HTMLElement>('#status');
-const shell = required<HTMLElement>('.stage-shell');
+const shellFor = (renderer: RendererName) => required<HTMLElement>(`#panel-${renderer} .stage-shell`);
 const canvas = required<HTMLCanvasElement>('#canvas-stage');
 const webglCanvas = required<HTMLCanvasElement>('#webgl-stage');
 const domViewport = required<HTMLElement>('#dom-stage');
@@ -158,6 +174,7 @@ const createMotion = (name: MotionName): MotionSource<unknown> => {
 let controller: Controller | undefined;
 let webglController: WebGLController | undefined;
 let manuallyPaused = false;
+let activeMotionKind: MotionSource<unknown>['kind'] = 'analytic';
 let motionBounds: Bounds;
 let staticPath: SvgStaticPath | undefined;
 let clearTrail: (() => void) | undefined;
@@ -193,6 +210,24 @@ const updateOutputs = (): void => {
 };
 
 const activeStage = (renderer: RendererName): void => {
+  const panel = required<HTMLElement>(`#panel-${renderer}`);
+  for (const candidate of rendererPanels) {
+    candidate.hidden = candidate !== panel;
+    candidate.tabIndex = 0;
+  }
+  for (const tab of rendererTabs) {
+    const selected = tab.dataset.renderer === renderer;
+    tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+  }
+  const settingsSlot = panel.querySelector('[data-settings-slot]')!;
+  const previewSlot = panel.querySelector('[data-preview-slot]')!;
+  if (librarySettings.parentElement !== settingsSlot) settingsSlot.append(librarySettings);
+  if (previewControls.parentElement !== previewSlot) previewSlot.append(previewControls);
+  const styledElement = renderer === 'dom' || renderer === 'svg';
+  const markerSlot = styledElement ? presentationMarkerSlot : nativeMarkerSlot;
+  if (markerConfig.parentElement !== markerSlot) markerSlot.append(markerConfig);
+  markerConfig.querySelector('legend')!.textContent = styledElement ? 'Marker element styling' : 'Marker';
   canvas.hidden = renderer !== 'canvas';
   webglCanvas.hidden = renderer !== 'webgl';
   webglReadout.hidden = renderer !== 'webgl';
@@ -200,7 +235,7 @@ const activeStage = (renderer: RendererName): void => {
   svgViewport.toggleAttribute('hidden', renderer !== 'svg');
   const bitmap = renderer === 'canvas' || renderer === 'webgl';
   const visibleOverflow = !bitmap && overflowSelect.value === 'visible';
-  shell.style.overflow = visibleOverflow ? 'visible' : 'hidden';
+  shellFor(renderer).style.overflow = visibleOverflow ? 'visible' : 'hidden';
   domViewport.style.overflow = visibleOverflow ? 'visible' : 'hidden';
   svgViewport.style.overflow = visibleOverflow ? 'visible' : 'hidden';
   overflowSelect.disabled = bitmap;
@@ -237,25 +272,37 @@ const readFraming = (): Framing => {
   return { ...framing, bounds };
 };
 
-const updateAvailability = (motion: MotionSource<unknown>): void => {
-  const dom = rendererSelect.value === 'dom';
-  const webgl = rendererSelect.value === 'webgl';
+const updateAvailability = (motion: Pick<MotionSource<unknown>, 'kind'>): void => {
+  const dom = selectedRenderer === 'dom';
+  const webgl = selectedRenderer === 'webgl';
   const spatialMotion = ['helix', 'lorenz', 'lissajous', 'duffing'].includes(motionSelect.value);
   if (!spatialMotion) webglView.value = 'planar';
   webglView.querySelector<HTMLOptionElement>('option[value="spatial"]')!.disabled = !spatialMotion;
   webglView.disabled = !webgl;
   webglCamera.disabled = !webgl || webglView.value !== 'spatial';
   const canOrbit = webgl && webglView.value === 'spatial';
+  for (const control of document.querySelectorAll<HTMLElement>('[data-renderers]')) {
+    control.hidden = !control.dataset.renderers!.split(' ').includes(selectedRenderer);
+  }
+  historyConfig.hidden = dom;
+  cameraConfig.hidden = !canOrbit;
+  cameraPresetControl.hidden = !canOrbit;
+  shadingConfig.hidden = !canOrbit;
+  pathControl.hidden = dom || webgl || motion.kind !== 'analytic';
   webglCanvas.toggleAttribute('data-orbit-enabled', canOrbit);
   webglCanvas.tabIndex = canOrbit ? 0 : -1;
   if (!canOrbit) endCameraDrag();
-  for (const control of [webglShape, webglColorMode, webglAccumulate, clearDrawingButton]) control.disabled = !webgl;
+  for (const control of [webglShape, webglAccumulate, webglPaint, clearDrawingButton]) control.disabled = !webgl;
+  webglLighting.disabled = !canOrbit;
+  const painting = webglPaint.checked;
+  accumulationLengthInput.disabled = !webgl || (!webglAccumulate.checked && !painting);
   webglNote.textContent = !webgl
     ? 'Choose WebGL for 3D Lissajous, Helix, Lorenz, or Duffing phase space.'
     : motionSelect.value === 'duffing'
-      ? 'Duffing phase space: radius shows displacement, height shows velocity, and angle shows forcing phase. Trails follow view changes; accumulation clears. Clear keeps time; reset restarts it.'
-      : 'Lissajous, Helix, and Lorenz offer XYZ motion. Trails follow view changes; accumulation clears. Clear keeps motion time; reset restarts it. Drawing is opaque.';
+      ? 'Duffing phase space: radius shows displacement, height shows velocity, and angle shows forcing phase. Retained drawing rotates with the camera. Sample limits bound retained geometry. Clear keeps time; reset restarts it.'
+      : 'Lissajous, Helix, and Lorenz offer XYZ motion. Retained drawing rotates with the camera. Sample limits bound retained geometry. Clear keeps motion time; reset restarts it. Drawing is opaque.';
   if (canOrbit) webglNote.textContent += ' Drag with a mouse or one finger to orbit; arrow keys also rotate the view. Choose a camera preset to restore its angle.';
+  if (painting && webgl) webglNote.textContent += ' Ribbon paint stays until cleared; reaching its limit pauses the animation.';
   trailInput.disabled = dom;
   trailLengthInput.disabled = dom || !trailInput.checked;
   pathInput.disabled = dom || webgl || motion.kind !== 'analytic';
@@ -263,11 +310,11 @@ const updateAvailability = (motion: MotionSource<unknown>): void => {
   visualNote.textContent = dom
     ? 'DOM moves your styled marker; Canvas, SVG, and WebGL provide optional trails. Full paths are available for periodic motions on Canvas and SVG.'
     : webgl
-      ? `${tailNote} Trails follow the current view. Accumulate drawing retains markers in a fixed view; choose one. Both use hardware depth testing. Marker-size scale and view depth are independent.`
+      ? `${tailNote} Paint ribbon uses the marker radius and retains the entire stroke until cleared. Its paint limit pauses motion without discarding earlier paint. Marker-size scale and view depth are independent.`
       : `${tailNote} Full paths ${motion.kind === 'stateful' ? 'require a periodic motion' : 'use cached geometry'}.`;
 };
 
-const spatialView = (): boolean => rendererSelect.value === 'webgl' && webglView.value === 'spatial';
+const spatialView = (): boolean => selectedRenderer === 'webgl' && webglView.value === 'spatial';
 
 // The example owns camera interaction; the rendering adapter receives snapshots.
 const presetCameraForView = (): OrthographicCamera | undefined => {
@@ -355,27 +402,39 @@ const readTrailLimit = (): number => {
   return count;
 };
 
-const updateStatus = (): void => {
-  const bitmap = rendererSelect.value === 'canvas' || rendererSelect.value === 'webgl';
-  const overflow = bitmap ? 'bitmap clipping' : `${overflowSelect.value} overflow`;
-  const webgl = rendererSelect.value === 'webgl'
-    ? ` ${spatialView() ? `${motionSelect.value === 'duffing' ? '3D phase space' : 'True 3D'}, ${draggedCamera ? 'dragged' : cameraPreset} orthographic camera` : 'Planar coordinates'}; ${trailInput.checked ? trailDescription() : webglAccumulate.checked ? 'accumulating drawing' : 'current marker only'}.`
-    : '';
-  const trail = rendererSelect.value !== 'webgl' && rendererSelect.value !== 'dom' && trailInput.checked
-    ? ` ${trailDescription()}.` : '';
-  status.textContent = `${motionSelect.selectedOptions[0].text} on ${rendererSelect.selectedOptions[0].text}; ${fitSelect.value} at ${zoomInput.value}×, position ${offsetXValue.value}/${offsetYValue.value}, ${overflow}.${webgl}${trail}`;
+const readAccumulationLimit = (): number => {
+  const count = accumulationLengthInput.valueAsNumber;
+  if (!accumulationLengthInput.checkValidity() || !Number.isSafeInteger(count) || count < 1) {
+    throw new RangeError('Retained samples / paint limit must be a positive safe integer (1–9007199254740991 samples). The current animation is unchanged.');
+  }
+  return count;
 };
 
-const mount = (): void => {
+const updateStatus = (): void => {
+  const bitmap = selectedRenderer === 'canvas' || selectedRenderer === 'webgl';
+  const overflow = bitmap ? 'bitmap clipping' : `${overflowSelect.value} overflow`;
+  const webgl = selectedRenderer === 'webgl'
+    ? ` ${spatialView() ? `${motionSelect.value === 'duffing' ? '3D phase space' : 'True 3D'}, ${draggedCamera ? 'dragged' : cameraPreset} orthographic camera` : 'Planar coordinates'}; ${trailInput.checked ? trailDescription() : webglPaint.checked ? `ribbon paint brush (${accumulationLengthInput.value} sample limit)` : webglAccumulate.checked ? `accumulating drawing (${accumulationLengthInput.value} samples)` : 'current marker only'}.`
+    : '';
+  const trail = selectedRenderer !== 'webgl' && selectedRenderer !== 'dom' && trailInput.checked
+    ? ` ${trailDescription()}.` : '';
+  status.textContent = `${motionSelect.selectedOptions[0].text} on ${rendererTabs.find((tab) => tab.dataset.renderer === selectedRenderer)!.textContent!.trim()}; ${fitSelect.value} at ${zoomInput.value}×, position ${offsetXValue.value}/${offsetYValue.value}, ${overflow}.${webgl}${trail}`;
+  if (webglController?.isPaintFull() && webglPaint.checked) status.textContent += ' Paint limit reached; clear or reset to paint again.';
+};
+
+const mount = (): boolean => {
   try {
-    const motion = createMotion(motionSelect.value as MotionName);
+    const motionName = motionSelect.value as MotionName;
+    const motion = createMotion(motionName);
     motionBounds = motion.bounds;
     updateAvailability(motion);
     setBoundsInputs(cameraForView()?.bounds ?? motion.bounds);
     const framing = readFraming();
     const maxSamples = trailInput.checked && !trailInput.disabled ? readTrailLimit() : 128;
+    const accumulationMaxSamples = selectedRenderer === 'webgl' && (webglAccumulate.checked || webglPaint.checked) ? readAccumulationLimit() : 12000;
     disposeCurrent();
-    const renderer = rendererSelect.value as RendererName;
+    const renderer = selectedRenderer as RendererName;
+    activeMotionKind = motion.kind;
     activeStage(renderer);
     applyMarkerStyle();
     const color = colorInput.value;
@@ -398,12 +457,18 @@ const mount = (): void => {
       });
     } else if (renderer === 'webgl') {
       webglController = animateWebGL(webglCanvas, motion, {
-        framing, autoplay: !manuallyPaused,
-        camera: cameraForView(), accumulate: webglAccumulate.checked,
+        framing, autoplay: !manuallyPaused, lighting: spatialView() && webglLighting.checked,
+        camera: cameraForView(), accumulate: webglAccumulate.checked ? { maxSamples: accumulationMaxSamples } : false,
         trail: trailInput.checked ? { maxSamples, width: 2 } : false,
+        paint: webglPaint.checked ? { maxSamples: accumulationMaxSamples } : false,
+        onPaintLimit() {
+          manuallyPaused = true;
+          pauseButton.textContent = 'Resume';
+          updateStatus();
+        },
         position(frame): Point3D {
           if (!spatialView()) return { x: frame.pose.x, y: frame.pose.y, z: frame.pose.z ?? 0 };
-          if (motionSelect.value === 'duffing') {
+          if (motionName === 'duffing') {
             const { x, y, forcingPhaseRadians } = frame.state as DuffingState;
             // A positive, bounded radius avoids folding displacement through
             // the cylinder axis; circular phase has no wrap discontinuity.
@@ -412,7 +477,7 @@ const mount = (): void => {
           }
           // Lissajous, Helix, and Lorenz preserve XYZ coordinates in state.
           const { x, y, z } = frame.state as Point3D;
-          return motionSelect.value === 'lorenz'
+          return motionName === 'lorenz'
             ? { x: x / 25, y: y / 25, z: (z - 27.5) / 25 }
             : { x, y, z };
         },
@@ -420,15 +485,9 @@ const mount = (): void => {
           webglTime.value = frame.elapsedSeconds.toFixed(3);
           webglSizeScale.value = (frame.pose.depth ?? 1).toFixed(2);
           webglDepth.value = frame.position.visibilityDepth.toFixed(3);
-          const brightness = webglColorMode.value === 'time'
-            ? 0.35 + 0.65 * (Math.sin(frame.elapsedSeconds * 2) + 1) / 2
-            : webglColorMode.value === 'depth'
-              ? 1 - 0.65 * Math.max(0, Math.min(1, frame.position.visibilityDepth))
-              : 1;
-          const [r, g, b] = selectedColor();
           return {
-            radius: Number(sizeInput.value), color: [r * brightness, g * brightness, b * brightness],
-            shape: webglShape.value === 'square' ? 'square' : 'circle',
+            radius: Number(sizeInput.value), color: selectedColor(),
+            shape: webglShape.value as 'circle' | 'square',
           };
         },
       });
@@ -452,8 +511,10 @@ const mount = (): void => {
     }
     pauseButton.textContent = manuallyPaused ? 'Resume' : 'Pause';
     updateStatus();
+    return true;
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : String(error);
+    return false;
   }
 };
 
@@ -505,27 +566,70 @@ motionSelect.addEventListener('change', () => {
   renderParameterControls();
   mount();
 });
-rendererSelect.addEventListener('change', () => {
-  if (rendererSelect.value === 'webgl' && trailInput.checked) webglAccumulate.checked = false;
-  mount();
+const selectRenderer = (renderer: RendererName): void => {
+  if (selectedRenderer === renderer) return;
+  const previous = selectedRenderer;
+  const previousAccumulation = webglAccumulate.checked;
+  const previousPaint = webglPaint.checked;
+  const previousView = webglView.value;
+  selectedRenderer = renderer;
+  if (renderer === 'webgl' && trailInput.checked) { webglAccumulate.checked = false; webglPaint.checked = false; }
+  if (!mount() && required<HTMLElement>(`#panel-${renderer}`).hidden) {
+    // Validation failed before the panel switch. Keep selection and controls
+    // coherent even if the current renderer could not create a controller.
+    selectedRenderer = previous;
+    webglAccumulate.checked = previousAccumulation;
+    webglPaint.checked = previousPaint;
+    webglView.value = previousView;
+    updateAvailability({ kind: activeMotionKind });
+    activeStage(previous);
+    rendererTabs.find((tab) => tab.dataset.renderer === previous)!.focus({ preventScroll: true });
+  }
+};
+for (const tab of rendererTabs) {
+  tab.addEventListener('click', () => selectRenderer(tab.dataset.renderer as RendererName));
+  tab.addEventListener('focus', () => {
+    for (const candidate of rendererTabs) candidate.tabIndex = candidate === tab ? 0 : -1;
+  });
+  tab.addEventListener('keydown', (event) => {
+    const index = rendererTabs.indexOf(tab);
+    const next = event.key === 'ArrowRight' ? (index + 1) % rendererTabs.length
+      : event.key === 'ArrowLeft' ? (index + rendererTabs.length - 1) % rendererTabs.length
+      : event.key === 'Home' ? 0 : event.key === 'End' ? rendererTabs.length - 1 : undefined;
+    if (next === undefined) return;
+    event.preventDefault();
+    rendererTabs[next].focus();
+  });
+}
+tablist.addEventListener('focusout', (event) => {
+  if (event.relatedTarget instanceof Node && tablist.contains(event.relatedTarget)) return;
+  for (const tab of rendererTabs) tab.tabIndex = tab.dataset.renderer === selectedRenderer ? 0 : -1;
 });
 for (const control of [fitSelect, zoomInput, offsetXInput, offsetYInput]) control.addEventListener('input', updateFraming);
-overflowSelect.addEventListener('change', () => { activeStage(rendererSelect.value as RendererName); updateStatus(); });
+overflowSelect.addEventListener('change', () => { activeStage(selectedRenderer as RendererName); updateStatus(); });
 for (const control of [colorInput, sizeInput]) control.addEventListener('change', () => {
   updateOutputs();
   if (webglController) updateFraming(); else mount();
 });
 pathInput.addEventListener('change', mount);
 trailInput.addEventListener('change', () => {
-  if (rendererSelect.value === 'webgl' && trailInput.checked) webglAccumulate.checked = false;
+  if (selectedRenderer === 'webgl' && trailInput.checked) { webglAccumulate.checked = false; webglPaint.checked = false; }
   mount();
 });
 trailLengthInput.addEventListener('change', mount);
 webglAccumulate.addEventListener('change', () => {
-  if (webglAccumulate.checked) trailInput.checked = false;
+  if (webglAccumulate.checked) { trailInput.checked = false; webglPaint.checked = false; }
   mount();
 });
-for (const control of [webglShape, webglColorMode]) control.addEventListener('change', updateFraming);
+accumulationLengthInput.addEventListener('change', mount);
+webglPaint.addEventListener('change', () => {
+  if (webglPaint.checked) { trailInput.checked = false; webglAccumulate.checked = false; }
+  mount();
+});
+webglShape.addEventListener('change', updateFraming);
+webglLighting.addEventListener('change', () => {
+  webglController?.setLighting(spatialView() && webglLighting.checked);
+});
 for (const control of [webglView, webglCamera]) control.addEventListener('change', () => {
   if (!webglController) return;
   try {
@@ -534,6 +638,7 @@ for (const control of [webglView, webglCamera]) control.addEventListener('change
       cameraPreset = webglCamera.value as 'front' | 'oblique';
       draggedCamera = undefined;
     }
+    const hadCustomBounds = customBounds.checked;
     customBounds.checked = false;
     for (const input of Object.values(boundsInputs)) input.disabled = true;
     // Coordinate views change the position mapping; camera presets reproject trails.
@@ -543,7 +648,9 @@ for (const control of [webglView, webglCamera]) control.addEventListener('change
     webglCamera.disabled = !spatialView();
     updateAvailability(createMotion(motionSelect.value as MotionName));
     webglController.setCamera(camera);
-    updateFraming();
+    webglController.setLighting(spatialView() && webglLighting.checked);
+    if (hadCustomBounds || control === webglView) updateFraming();
+    else updateStatus();
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : String(error);
   }
@@ -593,6 +700,7 @@ for (const input of Object.values(boundsInputs)) input.addEventListener('change'
 
 pauseButton.addEventListener('click', () => {
   if (!controller) return;
+  if (webglPaint.checked && webglController?.isPaintFull()) { updateStatus(); return; }
   if (manuallyPaused) {
     controller.resume();
     manuallyPaused = false;
@@ -608,7 +716,7 @@ defaultsButton.addEventListener('click', () => {
   valuesByMotion.clear();
   manuallyPaused = false;
   motionSelect.value = 'ellipse';
-  rendererSelect.value = 'canvas';
+  selectedRenderer = 'webgl';
   fitSelect.value = 'cover';
   zoomInput.value = '1';
   offsetXInput.value = '0';
@@ -624,13 +732,16 @@ defaultsButton.addEventListener('click', () => {
   cameraPreset = 'oblique';
   draggedCamera = undefined;
   webglShape.value = 'circle';
-  webglColorMode.value = 'solid';
+  webglLighting.checked = false;
   webglAccumulate.checked = false;
+  webglPaint.checked = false;
+  accumulationLengthInput.value = '12000';
   customBounds.checked = false;
   for (const input of Object.values(boundsInputs)) input.disabled = true;
   updateOutputs();
   renderParameterControls();
   mount();
+  defaultsButton.focus({ preventScroll: true });
 });
 window.addEventListener('beforeunload', disposeCurrent, { once: true });
 window.addEventListener('blur', endCameraDrag);
