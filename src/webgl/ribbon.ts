@@ -4,6 +4,8 @@ import type { Point3D } from '../core/orthographic';
 /** Chronological strip + cap slots, with only each stroke's start/end caps visible. */
 export interface PaintFootprints {
   readonly vertices: Float32Array;
+  /** Packed world-space XYZ normals, one per footprint vertex. */
+  readonly normals?: Float32Array;
   readonly count: number;
   readonly revision: number;
   readonly dirtySlot: number | undefined;
@@ -108,6 +110,100 @@ const writeFootprintCap = (footprintVertices: Float32Array, slot: number, point:
   });
 };
 
+// Connectivity is explicit: coincident vertices in separate strokes never share normals.
+interface NormalSample {
+  previous?: number;
+  next?: number;
+  corners?: readonly [Vector, Vector, Vector, Vector];
+  fallback: Vector;
+}
+const addVectors = (a: Vector, b: Vector): Vector => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const areaNormal = (vertices: Float32Array, offset: number): Vector => cross(
+  [vertices[offset + 9] - vertices[offset], vertices[offset + 10] - vertices[offset + 1],
+    vertices[offset + 11] - vertices[offset + 2]],
+  [vertices[offset + 18] - vertices[offset], vertices[offset + 19] - vertices[offset + 1],
+    vertices[offset + 20] - vertices[offset + 2]],
+);
+const createFootprintNormals = () => {
+  let buffer = new Float32Array(0);
+  let positions: Float32Array = new Float32Array(0);
+  const samples = new Map<number, NormalSample>();
+  const corner = (slot: number, index: number): Vector => {
+    const sample = samples.get(slot)!;
+    const own = sample.corners?.[index] ?? [0, 0, 0];
+    const neighbor = samples.get((index < 2 ? sample.previous : sample.next) ?? -1);
+    const other = neighbor?.corners?.[index < 2 ? index + 2 : index - 2] ?? [0, 0, 0];
+    // Both copies use the same chronological order, including the fallback
+    // when opposing faces cancel. Preserve winding through bends above 90 degrees.
+    const earlier = index < 2 ? other : own;
+    const later = index < 2 ? own : other;
+    return unit(addVectors(earlier, later))
+      ?? unit(earlier) ?? unit(later) ?? (index < 2 ? neighbor?.fallback ?? sample.fallback : sample.fallback);
+  };
+  const refresh = (slot: number, mark: (slot: number) => void): void => {
+    const sample = samples.get(slot);
+    if (!sample) return;
+    if (!sample.corners) sample.fallback = unit(areaNormal(positions, slot * 108 + 54)) ?? sample.fallback;
+    const corners = [0, 1, 2, 3].map((index) => corner(slot, index));
+    [0, 1, 2, 1, 3, 2].forEach((index, vertex) => buffer.set(corners[index], slot * 36 + vertex * 3));
+    const next = sample.next === undefined ? undefined : samples.get(sample.next);
+    const endpointSlot = sample.corners ? slot : next?.corners ? sample.next : undefined;
+    const endpointIndices = sample.corners ? [2, 3] : [0, 1];
+    const endpointNormals = endpointSlot === undefined ? undefined
+      : endpointIndices.map((index) => corner(endpointSlot, index));
+    const edgeOffset = endpointSlot === undefined ? undefined
+      : endpointSlot * 108 + (sample.corners ? 18 : 0);
+    const otherEdgeOffset = endpointSlot === undefined ? undefined
+      : endpointSlot * 108 + (sample.corners ? 36 : 9);
+    for (let vertex = 6; vertex < 12; vertex += 1) {
+      let normal = sample.fallback;
+      if (endpointNormals && edgeOffset !== undefined && otherEdgeOffset !== undefined) {
+        const edge = [0, 1, 2].map((axis) => positions[otherEdgeOffset + axis] - positions[edgeOffset + axis]);
+        const squaredLength = edge.reduce((sum, value) => sum + value * value, 0);
+        const projection = edge.reduce((sum, value, axis) => sum
+          + value * (positions[slot * 108 + vertex * 9 + axis] - positions[edgeOffset + axis]), 0);
+        const t = squaredLength > 0 ? Math.max(0, Math.min(1, projection / squaredLength)) : 0.5;
+        const [a, b] = endpointNormals;
+        normal = unit([a[0] * (1 - t) + b[0] * t, a[1] * (1 - t) + b[1] * t,
+          a[2] * (1 - t) + b[2] * t]) ?? sample.fallback;
+      }
+      buffer.set(normal, slot * 36 + vertex * 3);
+    }
+    mark(slot);
+  };
+  return {
+    get buffer() { return buffer; },
+    clear() { samples.clear(); },
+    add(vertices: Float32Array, slot: number, previous: number | undefined, mark: (slot: number) => void,
+      hasIncoming = previous !== undefined) {
+      positions = vertices;
+      if (buffer.length !== vertices.length / 3) {
+        const grown = new Float32Array(vertices.length / 3);
+        grown.set(buffer);
+        buffer = grown;
+      }
+      const fallback = unit(areaNormal(vertices, slot * 108 + 54)) ?? [0, 0, 1];
+      const sample: NormalSample = { previous, fallback };
+      if (hasIncoming) {
+        const a = areaNormal(vertices, slot * 108);
+        const b = areaNormal(vertices, slot * 108 + 27);
+        sample.corners = [a, addVectors(a, b), addVectors(a, b), b];
+      }
+      if (previous !== undefined) samples.get(previous)!.next = slot;
+      samples.set(slot, sample);
+      refresh(slot, mark);
+      if (previous !== undefined) refresh(previous, mark);
+    },
+    exposeTail(slot: number, mark: (slot: number) => void) {
+      const sample = samples.get(slot)!;
+      sample.previous = undefined;
+      sample.corners = undefined;
+      refresh(slot, mark);
+      if (sample.next !== undefined) refresh(sample.next, mark);
+    },
+  };
+};
+
 const validateDeposit = (pose: Pose, elapsedSeconds: number, width: number, direction: Point3D,
   color: Vector, footprint?: BrushFootprint): { point: Vector; normalized: Vector } => {
   const point: Vector = [pose.x, pose.y, pose.z ?? 0];
@@ -164,6 +260,8 @@ export const createRibbonBrush = (maxSamples = 12000): RibbonGeometry & {
   let endpoint: Endpoint | undefined;
   let elapsed: number | undefined;
   let footprintVertices = new Float32Array(0);
+  const footprintNormals = createFootprintNormals();
+  let endpointFootprintSlot: number | undefined;
   let footprintCount = 0;
   let footprintRevision = 0;
   let footprintDirtySlot: number | undefined;
@@ -173,12 +271,14 @@ export const createRibbonBrush = (maxSamples = 12000): RibbonGeometry & {
   let strokeEnd: { slot: number; point: Vector; color: Vector } | undefined;
   const breakStroke = (): void => {
     endpoint = undefined;
+    endpointFootprintSlot = undefined;
     strokeStartSlot = undefined;
     strokeStart = undefined;
     strokeEnd = undefined;
   };
   const footprints: PaintFootprints = {
     get vertices() { return footprintVertices; },
+    get normals() { return footprintNormals.buffer; },
     get count() { return footprintCount; },
     get revision() { return footprintRevision; },
     get dirtySlot() { return footprintDirtySlot; },
@@ -203,6 +303,7 @@ export const createRibbonBrush = (maxSamples = 12000): RibbonGeometry & {
       dirtySlot = undefined;
       revision += 1;
       footprintCount = 0;
+      footprintNormals.clear();
       footprintDirtySlot = undefined;
       footprintDirtyPreviousSlot = undefined;
       footprintRevision += 1;
@@ -278,6 +379,10 @@ export const createRibbonBrush = (maxSamples = 12000): RibbonGeometry & {
         const circle = footprint.shape === 'square' ? 0 : 1;
         writeFootprintCap(footprintVertices, slot, point, color, alignAxes(x, y,
           endpoint ? triangleNormal(vertices, (count - 1) * 18 + 9) : undefined), circle);
+        footprintNormals.add(footprintVertices, slot, endpoint ? endpointFootprintSlot : undefined, (changed) => {
+          if (changed !== slot) footprintDirtyPreviousSlot = changed;
+        }, endpoint !== undefined);
+        endpointFootprintSlot = slot;
         footprintCount += 1;
         footprintDirtySlot = slot;
         footprintRevision += 1;
@@ -287,6 +392,7 @@ export const createRibbonBrush = (maxSamples = 12000): RibbonGeometry & {
         }
         strokeEnd = { slot, point, color: [color[0], color[1], color[2]] };
       }
+      if (!footprint) endpointFootprintSlot = undefined;
       endpoint = { point, edges: endpoint ? to : undefined, width, color: [color[0], color[1], color[2]] };
       samples += 1;
     },
@@ -306,6 +412,7 @@ export const createTrimmingPaintBrush = (maxSamples = 12000): PaintBrush => {
   }
   let vertices = new Float32Array(0);
   const samples: TrimmingSample[] = [];
+  const footprintNormals = createFootprintNormals();
   let count = 0;
   let start = 0;
   let revision = 0;
@@ -330,6 +437,7 @@ export const createTrimmingPaintBrush = (maxSamples = 12000): PaintBrush => {
   const breakStroke = (): void => { endpoint = undefined; headSlot = undefined; };
   const footprints: PaintFootprints = {
     get vertices() { return vertices; },
+    get normals() { return footprintNormals.buffer; },
     get count() { return count; },
     get start() { return start; },
     get revision() { return revision; },
@@ -348,6 +456,7 @@ export const createTrimmingPaintBrush = (maxSamples = 12000): PaintBrush => {
       dirtySlots = [];
       elapsed = undefined;
       samples.length = 0;
+      footprintNormals.clear();
       breakStroke();
     },
     add(pose, elapsedSeconds, width, direction, color = [1, 0, 0], footprint) {
@@ -415,6 +524,8 @@ export const createTrimmingPaintBrush = (maxSamples = 12000): PaintBrush => {
           mark(previousSlot);
         }
       }
+      footprintNormals.add(vertices, slot, sample.hasIncoming ? previousSlot : undefined, mark);
+      if (overwriting && maxSamples > 1) footprintNormals.exposeTail(start, mark);
       endpoint = sample;
       headSlot = slot;
       revision += 1;

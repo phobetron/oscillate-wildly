@@ -1272,6 +1272,24 @@ try {
 
       const lightingCamera = { position: { x: 0, y: 0, z: 5 }, bounds, near: 1, far: 9 };
       const brightness = (pixel) => pixel[0] + pixel[1] + pixel[2];
+      for (const withoutDerivatives of [false, true]) {
+        for (const limitBehavior of ['pause', 'trim-oldest']) {
+          const smooth = fixture([
+            { pose: { x: -0.8, z: 1 }, marker: { color: [0.2, 0.6, 1], radius: 12 } },
+            { pose: { x: 0, z: -1 }, marker: { color: [0.2, 0.6, 1], radius: 12 } },
+            { pose: { x: 0.8, z: 1 }, marker: { color: [0.2, 0.6, 1], radius: 12 } },
+          ], { camera: lightingCamera, accumulate: false, paint: { maxSamples: 3, limitBehavior }, lighting: true, withoutDerivatives });
+          smooth.advance(1); smooth.advance(2);
+          const row = Array.from({ length: 51 }, (_, index) => smooth.rgba(25 + index, 50));
+          check(row.every((pixel) => pixel[3] === 255), 'Smooth ribbon keeps continuous coverage');
+          const jumps = row.slice(1).map((pixel, index) => Math.max(...pixel.slice(0, 3).map((value, channel) => Math.abs(value - row[index][channel]))));
+          check(Math.max(...jumps) <= 8, `Ribbon highlights interpolate through the segment join (${limitBehavior}, derivatives=${!withoutDerivatives}): ${Math.max(...jumps)}`);
+          check(Math.max(...row.map((pixel) => pixel[2])) - Math.min(...row.map((pixel) => pixel[2])) > 15,
+            'Smooth ribbon retains orientation-based shading instead of flattening the light');
+          smooth.dispose();
+        }
+      }
+
       for (const shape of ['circle', 'square']) {
         for (const withoutDerivatives of [false, true]) {
           const depthLit = fixture([

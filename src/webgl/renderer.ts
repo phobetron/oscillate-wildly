@@ -165,7 +165,10 @@ attribute vec3 corner;
 attribute vec3 paintColor;
 attribute vec2 paintLocal;
 attribute float paintCircle;
+attribute vec3 paintNormal;
 uniform mat4 projection;
+uniform mat3 normalProjection;
+varying mediump vec3 surfaceNormal;
 varying mediump vec2 local;
 varying mediump vec3 color;
 varying mediump float circle;
@@ -174,6 +177,7 @@ void main() {
   local = paintLocal;
   color = paintColor;
   circle = paintCircle;
+  surfaceNormal = normalProjection * paintNormal;
   gl_Position = projection * vec4(corner, 1.0);
   surfaceDepth = gl_Position.z;
 }
@@ -254,11 +258,19 @@ vec4 shade(vec3 base) {
     enabled: WebGLUniformLocation | null;
     viewScale: WebGLUniformLocation | null;
   }>();
-  const geometryProgram = (vertexSource: string, fragmentSource: string, attributes?: readonly string[]): WebGLProgram => {
+  const geometryProgram = (vertexSource: string, fragmentSource: string, attributes?: readonly string[], smooth = false): WebGLProgram => {
+    const source = smooth ? lightingSource.replace('vec4 shade(vec3 base)',
+      'varying mediump vec3 surfaceNormal;\nvec4 shade(vec3 base)').replace('  vec3 light =', `
+  float normalLength = length(surfaceNormal);
+  if (normalLength > 0.00001) {
+    normal = surfaceNormal / normalLength;
+    if (normal.z < 0.0) normal = -normal;
+  }
+  vec3 light =`) : lightingSource;
     const result = program(gl,
       vertexSource.replace('SURFACE_DEPTH_PRECISION', depthPrecision),
       (derivatives ? '#extension GL_OES_standard_derivatives : enable\n' : '') +
-        fragmentSource.replace('LIGHTING_SOURCE', lightingSource), attributes);
+        fragmentSource.replace('LIGHTING_SOURCE', source), attributes);
     lightingUniforms.set(result, {
       enabled: gl.getUniformLocation(result, 'lightingEnabled'),
       viewScale: gl.getUniformLocation(result, 'lightingViewScale'),
@@ -298,9 +310,13 @@ vec4 shade(vec3 base) {
   let ribbonRevision: number | undefined;
   let footprintsProgram: WebGLProgram | undefined;
   let footprintsBuffer: WebGLBuffer | undefined;
+  let footprintsNormalBuffer: WebGLBuffer | undefined;
   let footprintsProjection!: WebGLUniformLocation;
+  let footprintsNormalProjection!: WebGLUniformLocation;
   let footprintsVertices: Float32Array | undefined;
+  let footprintsNormals: Float32Array | undefined;
   let footprintsBufferCapacity = 0;
+  let footprintsNormalBufferCapacity = 0;
   let footprintsRevision: number | undefined;
   let buffer: WebGLBuffer | undefined;
   let texture: WebGLTexture | undefined;
@@ -332,6 +348,7 @@ vec4 shade(vec3 base) {
     if (ribbonColorBuffer) gl.deleteBuffer(ribbonColorBuffer);
     if (footprintsProgram) gl.deleteProgram(footprintsProgram);
     if (footprintsBuffer) gl.deleteBuffer(footprintsBuffer);
+    if (footprintsNormalBuffer) gl.deleteBuffer(footprintsNormalBuffer);
     if (buffer) gl.deleteBuffer(buffer);
     if (texture) gl.deleteTexture(texture);
     if (depth) gl.deleteRenderbuffer(depth);
@@ -343,9 +360,11 @@ vec4 shade(vec3 base) {
     ribbonColors = undefined;
     ribbonBufferCapacity = 0;
     ribbonRevision = undefined;
-    footprintsProgram = footprintsBuffer = undefined;
+    footprintsProgram = footprintsBuffer = footprintsNormalBuffer = undefined;
     footprintsVertices = undefined;
+    footprintsNormals = undefined;
     footprintsBufferCapacity = 0;
+    footprintsNormalBufferCapacity = 0;
     footprintsRevision = undefined;
     markersProgram = markersBuffer = undefined;
     markersVertices = new Float32Array(0);
@@ -662,6 +681,9 @@ vec4 shade(vec3 base) {
     },
     drawPaintFootprints(geometry: PaintFootprints, viewport: Viewport, projection: Float32Array): void {
       const capacity = geometry.vertices.length / 108;
+      if (geometry.normals && geometry.normals.length !== capacity * 36) {
+        throw new RangeError('WebGL paint normals must match world position storage');
+      }
       if (!Number.isInteger(capacity) || !Number.isSafeInteger(geometry.count) || geometry.count < 0 || geometry.count > capacity) {
         throw new RangeError('WebGL paint footprints must contain a valid sample count');
       }
@@ -678,7 +700,7 @@ vec4 shade(vec3 base) {
       }
       if (geometry.count === 0) return;
       const changed = geometry.revision !== footprintsRevision;
-      const fullUpload = !footprintsBuffer || footprintsVertices !== geometry.vertices || footprintsBufferCapacity !== geometry.vertices.length ||
+      const fullUpload = !footprintsBuffer || footprintsVertices !== geometry.vertices || footprintsNormals !== geometry.normals || footprintsBufferCapacity !== geometry.vertices.length ||
         (changed && (dirtySlots === undefined || footprintsRevision === undefined || geometry.revision !== footprintsRevision + 1));
       const ranges: [number, number][] = [];
       if (fullUpload) {
@@ -703,12 +725,20 @@ vec4 shade(vec3 base) {
             throw new RangeError('WebGL paint footprint vertices must contain finite positions, RGB in [0, 1], local coordinates in [-1, 1], and a circle flag of zero or one');
           }
         }
+        if (geometry.normals) {
+          for (let index = from / 3; index < to / 3; index++) {
+            if (!Number.isFinite(geometry.normals[index])) {
+              throw new RangeError('WebGL paint normals must be finite');
+            }
+          }
+        }
       }
       if (!footprintsProgram) {
         try {
-          footprintsProgram = geometryProgram(footprintsVertex, markersFragment, ['corner', 'paintColor', 'paintLocal', 'paintCircle']);
+          footprintsProgram = geometryProgram(footprintsVertex, markersFragment, ['corner', 'paintColor', 'paintLocal', 'paintCircle', 'paintNormal'], true);
           footprintsBuffer = required(gl.createBuffer(), 'paint footprints buffer');
           footprintsProjection = required(gl.getUniformLocation(footprintsProgram, 'projection'), 'paint footprints projection uniform');
+          footprintsNormalProjection = required(gl.getUniformLocation(footprintsProgram, 'normalProjection'), 'paint normal projection uniform');
         } catch (error) {
           if (footprintsProgram) { gl.deleteProgram(footprintsProgram); lightingUniforms.delete(footprintsProgram); }
           if (footprintsBuffer) gl.deleteBuffer(footprintsBuffer);
@@ -719,7 +749,8 @@ vec4 shade(vec3 base) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, target!);
       bindQuad();
       gl.bindBuffer(gl.ARRAY_BUFFER, footprintsBuffer!);
-      if (footprintsBufferCapacity !== geometry.vertices.length) {
+      const resized = footprintsBufferCapacity !== geometry.vertices.length;
+      if (resized) {
         gl.bufferData(gl.ARRAY_BUFFER, geometry.vertices.byteLength, gl.DYNAMIC_DRAW);
         footprintsBufferCapacity = geometry.vertices.length;
       }
@@ -736,12 +767,42 @@ vec4 shade(vec3 base) {
       gl.vertexAttribPointer(2, 2, gl.FLOAT, false, stride, 6 * Float32Array.BYTES_PER_ELEMENT);
       gl.enableVertexAttribArray(3);
       gl.vertexAttribPointer(3, 1, gl.FLOAT, false, stride, 8 * Float32Array.BYTES_PER_ELEMENT);
+      if (geometry.normals) {
+        const created = !footprintsNormalBuffer;
+        if (created) footprintsNormalBuffer = required(gl.createBuffer(), 'paint normals buffer');
+        gl.bindBuffer(gl.ARRAY_BUFFER, footprintsNormalBuffer!);
+        if (footprintsNormalBufferCapacity !== geometry.normals.length || created) {
+          gl.bufferData(gl.ARRAY_BUFFER, geometry.normals.byteLength, gl.DYNAMIC_DRAW);
+          footprintsNormalBufferCapacity = geometry.normals.length;
+        }
+        for (const [from, to] of ranges) {
+          gl.bufferSubData(gl.ARRAY_BUFFER, from / 3 * Float32Array.BYTES_PER_ELEMENT, geometry.normals.subarray(from / 3, to / 3));
+        }
+        gl.enableVertexAttribArray(4);
+        gl.vertexAttribPointer(4, 3, gl.FLOAT, false, 0, 0);
+      } else {
+        gl.disableVertexAttribArray(4);
+        gl.vertexAttrib3f(4, 0, 0, 0);
+      }
+      footprintsNormals = geometry.normals;
       gl.enable(gl.DEPTH_TEST);
       gl.depthMask(true);
       gl.depthFunc(gl.LEQUAL);
       gl.useProgram(footprintsProgram!);
       applyLighting(footprintsProgram!);
       gl.uniformMatrix4fv(footprintsProjection, false, projection);
+      // Remove orthographic zoom/aspect/depth scale from the camera rows.
+      // View Z faces the camera, opposite the projection's clipping-depth axis.
+      const normalProjection = new Float32Array(9);
+      for (let row = 0; row < 3; row++) {
+        const length = Math.hypot(projection[row], projection[row + 4], projection[row + 8]);
+        for (let column = 0; column < 3; column++) {
+          normalProjection[column * 3 + row] = length > 0
+            ? projection[column * 4 + row] / length * (row === 2 ? -1 : 1)
+            : row === column ? 1 : 0;
+        }
+      }
+      gl.uniformMatrix3fv(footprintsNormalProjection, false, normalProjection);
       // Connectors and endpoint caps share chronological submission; interior
       // caps are degenerate, and newer equal-depth paint wins at crossings.
       const first = Math.min(geometry.count, capacity - start);

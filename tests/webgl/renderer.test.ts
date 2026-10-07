@@ -1,11 +1,13 @@
 import { describe, expect, it } from '@rstest/core';
 import { createMarkerRenderer } from '../../src/webgl/renderer';
 import type { PaintFootprints } from '../../src/webgl/ribbon';
+import { createRibbonBrush } from '../../src/webgl/ribbon';
 
 const fakeGL = () => {
   const uploads: { offset: number; data: Float32Array }[] = [];
   const draws: { first: number; count: number }[] = [];
   const allocations: number[] = [];
+  const normalProjections: Float32Array[] = [];
   const methods: Record<string, unknown> = {
     getExtension: () => null,
     getShaderPrecisionFormat: () => ({ precision: 23 }),
@@ -19,6 +21,7 @@ const fakeGL = () => {
       uploads.push({ offset, data: new Float32Array(data) });
     },
     drawArrays: (_mode: number, first: number, count: number) => { draws.push({ first, count }); },
+    uniformMatrix3fv: (_location: unknown, _transpose: boolean, matrix: Float32Array) => { normalProjections.push(new Float32Array(matrix)); },
   };
   const gl = new Proxy(methods, {
     get: (target, key: string) => {
@@ -28,7 +31,7 @@ const fakeGL = () => {
       return () => {};
     },
   }) as unknown as WebGLRenderingContext;
-  return { gl, uploads, draws, allocations };
+  return { gl, uploads, draws, allocations, normalProjections };
 };
 
 const geometry = (capacity = 8): PaintFootprints => ({
@@ -52,6 +55,74 @@ const setup = () => {
 };
 
 describe('paint footprint renderer', () => {
+  it('resizes normal storage after growing geometry while normals were omitted', () => {
+    const { gl, allocations } = fakeGL();
+    const renderer = createMarkerRenderer(gl);
+    renderer.drawPaintFootprints({ ...geometry(2), normals: new Float32Array(2 * 36) }, viewport, projection);
+    const larger = geometry(8);
+    renderer.drawPaintFootprints(larger, viewport, projection);
+    const allocated = allocations.length;
+    renderer.drawPaintFootprints({ ...larger, normals: new Float32Array(8 * 36) }, viewport, projection);
+    expect(allocations.slice(allocated)).toEqual([8 * 36 * 4]);
+  });
+
+  it('rotates normals without introducing orthographic zoom, aspect or clipping-depth scale', () => {
+    const { gl, uploads, normalProjections } = fakeGL();
+    const renderer = createMarkerRenderer(gl);
+    const initial = { ...geometry(), normals: new Float32Array(8 * 36) };
+    const matrix = new Float32Array([2, 0, 0, 0, 0, 3, 0, 0, 0, 0, -0.1, 0, 0, 0, 0, 1]);
+    renderer.drawPaintFootprints(initial, viewport, matrix);
+    expect(Array.from(normalProjections.at(-1)!, (value) => value + 0)).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    uploads.length = 0;
+    matrix[0] = 10; matrix[5] = 20; matrix[10] = -0.05;
+    renderer.drawPaintFootprints(initial, viewport, matrix);
+    expect(Array.from(normalProjections.at(-1)!, (value) => value + 0)).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    expect(uploads).toEqual([]);
+  });
+
+  it('uploads normal blocks alongside disjoint dirty vertex blocks without reallocating stable storage', () => {
+    const { gl, uploads, allocations } = fakeGL();
+    const renderer = createMarkerRenderer(gl);
+    const initial = { ...geometry(), normals: new Float32Array(8 * 36) };
+    renderer.drawPaintFootprints(initial, viewport, projection);
+    const allocated = allocations.length;
+    uploads.length = 0;
+    renderer.drawPaintFootprints({ ...initial, revision: 2, dirtySlots: [0, 1, 7] }, viewport, projection);
+    expect(uploads.map(({ offset, data }) => [offset, data.length])).toEqual([
+      [0, 216], [7 * 108 * 4, 108], [0, 72], [7 * 36 * 4, 36],
+    ]);
+    expect(allocations.length).toBe(allocated);
+  });
+
+  it('uploads production normals in the same dirty ranges and reuses them on camera/lighting redraws', () => {
+    const { gl, uploads, allocations } = fakeGL();
+    const renderer = createMarkerRenderer(gl);
+    const brush = createRibbonBrush(8);
+    const footprint = { axisX: { x: 0.2, y: 0, z: 0 }, axisY: { x: 0, y: 0.2, z: 0 } };
+    for (let index = 0; index < 4; index++) {
+      brush.add({ x: index, y: 0, z: index % 2 }, index, 0.4, { x: 0, y: 1, z: 0 }, [0.2, 0.6, 1], footprint);
+    }
+    renderer.drawPaintFootprints(brush.footprints, viewport, projection);
+    const allocated = allocations.length;
+    uploads.length = 0;
+    renderer.setLighting(true, [1, 1, 2]);
+    renderer.drawPaintFootprints(brush.footprints, viewport, projection);
+    expect(uploads).toEqual([]);
+    brush.add({ x: 4, y: 0, z: 0 }, 4, 0.4, { x: 0, y: 1, z: 0 }, [0.2, 0.6, 1], footprint);
+    renderer.drawPaintFootprints(brush.footprints, viewport, projection);
+    // Capacity growth reallocates both storage buffers together.
+    expect(uploads.some(({ data }) => data.length === brush.footprints.normals!.length)).toBe(true);
+    expect(allocations.length).toBe(allocated + 2);
+  });
+
+  it('rejects mismatched and nonfinite normals before submitting geometry', () => {
+    const { renderer, uploads, initial } = setup();
+    expect(() => renderer.drawPaintFootprints({ ...initial, normals: new Float32Array(3) }, viewport, projection)).toThrow(RangeError);
+    const normals = new Float32Array(8 * 36);
+    normals[7 * 36] = NaN;
+    expect(() => renderer.drawPaintFootprints({ ...initial, normals }, viewport, projection)).toThrow(RangeError);
+    expect(uploads).toEqual([]);
+  });
   it('draws wrapped samples oldest first in two physical ranges', () => {
     const { renderer, draws, initial } = setup();
     renderer.drawPaintFootprints({ ...initial, start: 6 }, viewport, projection);

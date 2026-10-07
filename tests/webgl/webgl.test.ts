@@ -11,7 +11,8 @@ const fakeGL = (derivatives = true) => {
   let nextId = 1;
   let lost = false;
   let boundBuffer: unknown;
-  let uploadedBuffer: unknown;
+  const submitted: { buffer: unknown; data: Float32Array }[] = [];
+  const normalBuffers = new Set<unknown>();
   const buffers = new Map<unknown, Float32Array>();
   const value: Record<string, unknown> = {};
   const constants = [
@@ -38,7 +39,7 @@ const fakeGL = (derivatives = true) => {
     'framebufferRenderbuffer', 'enableVertexAttribArray', 'disableVertexAttribArray', 'vertexAttribPointer', 'disable', 'colorMask',
     'viewport', 'depthMask', 'clearColor', 'clearDepth', 'clear', 'texImage2D', 'bindRenderbuffer',
     'renderbufferStorage', 'enable', 'depthFunc', 'useProgram', 'uniform3f', 'uniform2f', 'uniform1i',
-    'drawArrays', 'activeTexture',
+    'drawArrays', 'activeTexture', 'uniformMatrix3fv', 'vertexAttrib3f',
   ]) value[name] = (...args: unknown[]) => { operations.push([name, ...args]); };
   value.bindBuffer = (target: number, buffer: unknown) => { boundBuffer = buffer; operations.push(['bindBuffer', target, buffer]); };
   value.bufferData = (target: number, data: number | Float32Array, usage: number) => {
@@ -47,11 +48,15 @@ const fakeGL = (derivatives = true) => {
   };
   value.bufferSubData = (target: number, offset: number, data: Float32Array) => {
     buffers.get(boundBuffer)?.set(data, offset / 4);
-    uploadedBuffer = boundBuffer;
+    submitted.push({ buffer: boundBuffer, data: new Float32Array(data) });
     operations.push(['bufferSubData', target, offset, new Float32Array(data)]);
   };
   value.uniformMatrix4fv = (location: unknown, transpose: boolean, matrix: Float32Array) => {
     operations.push(['uniformMatrix4fv', location, transpose, new Float32Array(matrix)]);
+  };
+  value.vertexAttribPointer = (...args: unknown[]) => {
+    if (args[0] === 4 && args[1] === 3) normalBuffers.add(boundBuffer);
+    operations.push(['vertexAttribPointer', ...args]);
   };
   Object.assign(value, {
     getShaderParameter: () => true,
@@ -71,7 +76,8 @@ const fakeGL = (derivatives = true) => {
     failFramebuffer: () => { value.checkFramebufferStatus = () => -1; },
     setLost: (next: boolean) => { lost = next; },
     count: (name: string) => operations.filter(([operation]) => operation === name).length,
-    uploadedBuffer: () => Array.from(buffers.get(uploadedBuffer) ?? []),
+    uploadedBuffer: () => Array.from(buffers.get([...submitted].reverse().find(({ buffer }) => !normalBuffers.has(buffer))?.buffer) ?? []),
+    uploadedPositions: () => [...submitted].reverse().find(({ buffer }) => !normalBuffers.has(buffer))?.data ?? new Float32Array(),
   };
 };
 
@@ -131,8 +137,7 @@ const restore = (canvas: Canvas, gl: ReturnType<typeof fakeGL>) => {
 
 describe('WebGL adapter', () => {
   const uploadedTrail = (gl: ReturnType<typeof fakeGL>): number[] => {
-    const upload = gl.operations.filter(([operation]) => operation === 'bufferSubData').at(-1);
-    return Array.from(upload?.[3] as Float32Array ?? []);
+    return Array.from(gl.uploadedPositions());
   };
   const coordinates = (vertices: number[], axis: number) => vertices.filter((_, index) => index % 3 === axis);
 
@@ -408,7 +413,7 @@ describe('WebGL adapter', () => {
     expect(controller.isPaintFull()).toBe(true);
     expect(controller.isPaused()).toBe(true);
     expect(limits).toBe(1);
-    const positions = gl.operations.filter(([name]) => name === 'bufferSubData').at(-1)?.[3] as Float32Array;
+    const positions = gl.uploadedPositions();
     const ys = Array.from(positions).filter((_, index) => index % 9 === 1);
     expect(Math.max(...ys) - Math.min(...ys)).toBeCloseTo(0.4); // radius 5 × pose.depth 2 gives 20 CSS pixels.
     const uploads = gl.count('bufferSubData');
@@ -427,7 +432,7 @@ describe('WebGL adapter', () => {
     platform.fire(1000); platform.fire(1100);
     expect(gl.count('bufferSubData')).toBeGreaterThan(uploads);
     controller.dispose();
-    expect(gl.count('deleteBuffer')).toBe(2);
+    expect(gl.count('deleteBuffer')).toBe(3); // Quad, paint vertices and smooth normals.
   });
 
   it('paints independently of marker shape and rejects invalid brushes', () => {
@@ -471,7 +476,8 @@ describe('WebGL adapter', () => {
       const firstOperation = gl.operations.length;
       platform.fire(index * 100);
       const uploads = gl.operations.slice(firstOperation).filter(([name]) => name === 'bufferSubData');
-      expect(uploads.reduce((sum, upload) => sum + (upload[3] as Float32Array).length, 0)).toBeLessThanOrEqual(3 * 108);
+      // Head, previous head, exposed tail and its outgoing strip; each has XYZ normals too.
+      expect(uploads.reduce((sum, upload) => sum + (upload[3] as Float32Array).length, 0)).toBeLessThanOrEqual(4 * (108 + 36));
     }
     expect(gl.count('bufferData')).toBe(allocations);
     const stored = gl.uploadedBuffer();
@@ -555,7 +561,7 @@ describe('WebGL adapter', () => {
     for (const target of [fixed, orbiting]) { target.platform.fire(0); target.platform.fire(100); }
     orbiting.controller.setCamera({ ...camera, position: { x: 7, y: -7, z: 3 }, up: { x: 0, y: 0, z: 1 } });
     for (const target of [fixed, orbiting]) target.platform.fire(200);
-    const positions = (gl: ReturnType<typeof fakeGL>) => gl.operations.filter(([name]) => name === 'bufferSubData').at(-1)?.[3];
+    const positions = (gl: ReturnType<typeof fakeGL>) => gl.uploadedPositions();
     expect(positions(orbiting.gl)).toEqual(positions(fixed.gl));
     orbiting.controller.setFraming({ fit: 'contain', zoom: 2 });
     for (const target of [fixed, orbiting]) target.platform.fire(300);
