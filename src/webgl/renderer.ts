@@ -665,23 +665,36 @@ vec4 shade(vec3 base) {
       if (!Number.isInteger(capacity) || !Number.isSafeInteger(geometry.count) || geometry.count < 0 || geometry.count > capacity) {
         throw new RangeError('WebGL paint footprints must contain a valid sample count');
       }
-      if (geometry.dirtySlot !== undefined && (!Number.isSafeInteger(geometry.dirtySlot) || geometry.dirtySlot < 0 || geometry.dirtySlot >= capacity)) {
-        throw new RangeError('WebGL paint footprint dirty sample must be within storage');
+      const start = geometry.start ?? 0;
+      if (!Number.isSafeInteger(start) || start < 0 || (capacity > 0 ? start >= capacity : start !== 0)) {
+        throw new RangeError('WebGL paint footprint start sample must be within storage');
       }
-      if (geometry.dirtyPreviousSlot !== undefined && (!Number.isSafeInteger(geometry.dirtyPreviousSlot) || geometry.dirtyPreviousSlot < 0 || geometry.dirtyPreviousSlot >= capacity)) {
-        throw new RangeError('WebGL paint footprint previous dirty sample must be within storage');
+      const dirtySlots = geometry.dirtySlots ?? (geometry.dirtySlot === undefined ? undefined :
+        [geometry.dirtySlot, ...(geometry.dirtyPreviousSlot === undefined ? [] : [geometry.dirtyPreviousSlot])]);
+      for (const slot of [geometry.dirtySlot, geometry.dirtyPreviousSlot, ...(geometry.dirtySlots ?? [])]) {
+        if (slot !== undefined && (!Number.isSafeInteger(slot) || slot < 0 || slot >= capacity)) {
+          throw new RangeError('WebGL paint footprint dirty sample must be within storage');
+        }
       }
       if (geometry.count === 0) return;
       const changed = geometry.revision !== footprintsRevision;
       const fullUpload = !footprintsBuffer || footprintsVertices !== geometry.vertices || footprintsBufferCapacity !== geometry.vertices.length ||
-        (changed && geometry.dirtySlot === undefined);
-      const dirtySlot = geometry.dirtySlot ?? 0;
-      const offset = fullUpload ? 0 : Math.min(dirtySlot, geometry.dirtyPreviousSlot ?? dirtySlot) * 108;
-      const upload = fullUpload || (changed && geometry.dirtySlot !== undefined);
-      const vertices = upload ? geometry.vertices.subarray(offset, fullUpload ? geometry.vertices.length : (dirtySlot + 1) * 108) : undefined;
-      if (vertices) {
-        for (let index = 0; index < vertices.length; index++) {
-          const value = vertices[index];
+        (changed && (dirtySlots === undefined || footprintsRevision === undefined || geometry.revision !== footprintsRevision + 1));
+      const ranges: [number, number][] = [];
+      if (fullUpload) {
+        ranges.push([0, geometry.vertices.length]);
+      } else if (changed && dirtySlots) {
+        // Merge only physically adjacent slots. Ring wrap leaves two uploads,
+        // avoiding a resubmission of the unchanged history between them.
+        for (const slot of [...new Set(dirtySlots)].sort((a, b) => a - b)) {
+          const previous = ranges[ranges.length - 1];
+          if (previous && previous[1] === slot * 108) previous[1] = (slot + 1) * 108;
+          else ranges.push([slot * 108, (slot + 1) * 108]);
+        }
+      }
+      for (const [from, to] of ranges) {
+        for (let index = from; index < to; index++) {
+          const value = geometry.vertices[index];
           const channel = index % 9;
           if (!Number.isFinite(value) ||
               (channel >= 3 && channel <= 5 && (value < 0 || value > 1)) ||
@@ -710,7 +723,9 @@ vec4 shade(vec3 base) {
         gl.bufferData(gl.ARRAY_BUFFER, geometry.vertices.byteLength, gl.DYNAMIC_DRAW);
         footprintsBufferCapacity = geometry.vertices.length;
       }
-      if (vertices) gl.bufferSubData(gl.ARRAY_BUFFER, offset * Float32Array.BYTES_PER_ELEMENT, vertices);
+      for (const [from, to] of ranges) {
+        gl.bufferSubData(gl.ARRAY_BUFFER, from * Float32Array.BYTES_PER_ELEMENT, geometry.vertices.subarray(from, to));
+      }
       footprintsVertices = geometry.vertices;
       footprintsRevision = geometry.revision;
       const stride = 9 * Float32Array.BYTES_PER_ELEMENT;
@@ -729,7 +744,9 @@ vec4 shade(vec3 base) {
       gl.uniformMatrix4fv(footprintsProjection, false, projection);
       // Connectors and endpoint caps share chronological submission; interior
       // caps are degenerate, and newer equal-depth paint wins at crossings.
-      gl.drawArrays(gl.TRIANGLES, 0, geometry.count * 12);
+      const first = Math.min(geometry.count, capacity - start);
+      gl.drawArrays(gl.TRIANGLES, start * 12, first * 12);
+      if (first < geometry.count) gl.drawArrays(gl.TRIANGLES, 0, (geometry.count - first) * 12);
     },
     setMarkers(markers: readonly WebGLMarker[], maxSamples: number): void {
       validateMarkerLimit(maxSamples);

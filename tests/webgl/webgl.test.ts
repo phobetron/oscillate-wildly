@@ -448,6 +448,81 @@ describe('WebGL adapter', () => {
     })).toThrow(/cannot be combined/);
   });
 
+  it('continues bounded painting in trim-oldest mode and preserves retained geometry on redraw and recovery', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const canvas = new Canvas(gl.value);
+    let limits = 0;
+    const sampleTimes: number[] = [];
+    const controller = animateWebGL(canvas.asElement(), source(), {
+      platform, camera, paint: { maxSamples: 5, limitBehavior: 'trim-oldest' },
+      onPaintLimit: () => { limits++; }, marker(frame) {
+        if (sampleTimes.at(-1) !== frame.elapsedSeconds) sampleTimes.push(frame.elapsedSeconds);
+        return { radius: 5 };
+      },
+    });
+    platform.fire(0);
+    for (let index = 1; index <= 8; index++) platform.fire(index * 100);
+    expect(controller.isPaintFull()).toBe(true);
+    expect(controller.isPaused()).toBe(false);
+    expect(limits).toBe(0);
+    const allocations = gl.count('bufferData');
+    for (let index = 9; index <= 40; index++) {
+      const firstOperation = gl.operations.length;
+      platform.fire(index * 100);
+      const uploads = gl.operations.slice(firstOperation).filter(([name]) => name === 'bufferSubData');
+      expect(uploads.reduce((sum, upload) => sum + (upload[3] as Float32Array).length, 0)).toBeLessThanOrEqual(3 * 108);
+    }
+    expect(gl.count('bufferData')).toBe(allocations);
+    const stored = gl.uploadedBuffer();
+    expect(stored).toHaveLength(5 * 108);
+    // Connector slot XYZ begins at the prior point: no evicted point remains in geometry.
+    const xs = stored.filter((_, index) => index % 9 === 0);
+    expect(Math.min(...xs)).toBeCloseTo(sampleTimes.at(-5)! - 0.2);
+    controller.pause();
+    const uploads = gl.count('bufferSubData');
+    controller.setCamera({ ...camera, position: { x: 2, y: -3, z: 8 } });
+    controller.setLighting(true);
+    expect(gl.count('bufferSubData')).toBe(uploads);
+    expect(controller.isPaused()).toBe(true);
+    loss(canvas, gl); restore(canvas, gl);
+    expect(gl.uploadedBuffer()).toEqual(stored);
+    expect(controller.isPaintFull()).toBe(true);
+    controller.resume();
+    expect(platform.callbacks.size).toBe(1);
+    controller.clear();
+    expect(controller.isPaintFull()).toBe(false);
+    platform.fire(4100); platform.fire(4200);
+    expect(controller.isPaused()).toBe(false);
+    controller.dispose();
+  });
+
+  it('supports a one-sample rolling dab and rejects invalid paint limit policies before resource allocation', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+      platform, paint: { maxSamples: 1, limitBehavior: 'trim-oldest' },
+    });
+    expect(controller.isPaintFull()).toBe(true);
+    expect(controller.isPaused()).toBe(false);
+    platform.fire(0); platform.fire(100);
+    expect(controller.isPaused()).toBe(false);
+    expect(gl.uploadedBuffer()).toHaveLength(108);
+    controller.pause(); controller.resume();
+    expect(platform.callbacks.size).toBe(1);
+    controller.dispose();
+    const invalidGL = fakeGL();
+    expect(() => animateWebGL(new Canvas(invalidGL.value).asElement(), source(), {
+      paint: { limitBehavior: 'invalid' as 'pause' }, platform: new Platform(),
+    })).toThrow(/limitBehavior/);
+    expect(invalidGL.count('createProgram')).toBe(0);
+    for (const maxSamples of [0, -1, 1.5, NaN, Infinity]) {
+      expect(() => animateWebGL(new Canvas(invalidGL.value).asElement(), source(), {
+        paint: { maxSamples, limitBehavior: 'trim-oldest' }, platform: new Platform(),
+      })).toThrow(RangeError);
+    }
+  });
+
   it('lifts the brush when contain padding collapses a tiny viewport without losing paint or faulting', () => {
     const gl = fakeGL();
     const canvas = new Canvas(gl.value);

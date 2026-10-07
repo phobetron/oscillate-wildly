@@ -5,7 +5,8 @@ import type { Controller, Frame, RuntimePlatform } from '../runtime';
 import { createTrailHistory } from '../runtime/trail';
 import { createMarkerRenderer } from './renderer';
 import type { WebGLMarker, WebGLMarkerOptions, WebGLTrailStyle } from './renderer';
-import { createRibbonBrush } from './ribbon';
+import { createRibbonBrush, createTrimmingPaintBrush } from './ribbon';
+import type { PaintBrush } from './ribbon';
 
 export type { WebGLColor, WebGLMarkerOptions } from './renderer';
 
@@ -32,8 +33,10 @@ export interface WebGLAccumulationOptions {
 }
 
 export interface WebGLPaintOptions {
-  /** Maximum brush samples before painting pauses. Defaults to 12000. Earlier paint is preserved. */
+  /** Maximum retained brush samples. Positive safe integer; defaults to 12000. */
   readonly maxSamples?: number;
+  /** Pause to preserve earlier paint (default), or replace oldest paint while continuing. */
+  readonly limitBehavior?: 'pause' | 'trim-oldest';
 }
 
 export interface AnimateWebGLOptions<State> {
@@ -47,7 +50,7 @@ export interface AnimateWebGLOptions<State> {
   readonly accumulate?: boolean | WebGLAccumulationOptions;
   /** Paint a connected ribbon using the marker footprint, independently of marker shape. Exclusive with trail and accumulate. */
   readonly paint?: boolean | WebGLPaintOptions;
-  /** Called once when a ribbon brush fills its sample budget and pauses. Clear or reset starts a new budget. */
+  /** Called once when a ribbon brush fills its sample budget and pauses. Not called in trim-oldest mode. Clear or reset starts a new budget. */
   readonly onPaintLimit?: () => void;
   /** Bounded, opaque connected tail. true uses defaults. Cannot be combined with accumulate. */
   readonly trail?: boolean | WebGLTrailOptions;
@@ -63,7 +66,7 @@ export interface AnimateWebGLOptions<State> {
 }
 
 export interface WebGLController extends Controller {
-  /** Whether deposited ribbon paint has filled its sample budget. */
+  /** Whether retained ribbon paint has filled its sample budget. Trim-oldest mode can remain full while animating. */
   isPaintFull(): boolean;
   /** Clear all drawing and retained history immediately, without resetting or redrawing the motion. */
   clear(): void;
@@ -121,7 +124,13 @@ export const animateWebGL = <State>(
   const paint = options.paint ? options.paint === true ? {} : options.paint : undefined;
   if ([trail, accumulation, paint].filter(Boolean).length > 1) throw new TypeError('WebGL trail, accumulate, and paint cannot be combined');
   const accumulationLimit = accumulation?.maxSamples ?? 12000;
-  const ribbon = paint ? createRibbonBrush(paint.maxSamples) : undefined;
+  const paintLimitBehavior = paint?.limitBehavior ?? 'pause';
+  if (paintLimitBehavior !== 'pause' && paintLimitBehavior !== 'trim-oldest') {
+    throw new TypeError('WebGL paint limitBehavior must be pause or trim-oldest');
+  }
+  const ribbon: PaintBrush | undefined = paint
+    ? paintLimitBehavior === 'trim-oldest' ? createTrimmingPaintBrush(paint.maxSamples) : createRibbonBrush(paint.maxSamples)
+    : undefined;
   let previousBrushPose: Pose | undefined;
   let brushBasis: { x: number[]; y: number[]; xx: number; yy: number; xy: number; determinant: number } | undefined;
   let currentBrush = false;
@@ -325,7 +334,7 @@ export const animateWebGL = <State>(
               axisY: { x: axisY[0], y: axisY[1], z: axisY[2] },
             });
             previousBrushPose = { ...pose };
-            if (ribbon.full) {
+            if (ribbon.full && paintLimitBehavior === 'pause') {
               controller?.pause();
               if (!wasFull) options.onPaintLimit?.();
             }
@@ -365,11 +374,11 @@ export const animateWebGL = <State>(
   }
 
   const runtime = controller;
-  if (currentBrush && ribbon?.full) runtime.pause();
+  if (currentBrush && ribbon?.full && paintLimitBehavior === 'pause') runtime.pause();
   return {
     ...runtime,
     isPaintFull: () => ribbon?.full ?? false,
-    resume() { if (!currentBrush || !ribbon?.full) runtime.resume(); },
+    resume() { if (paintLimitBehavior === 'trim-oldest' || !currentBrush || !ribbon?.full) runtime.resume(); },
     setFraming(nextFraming) {
       if (disposed) return;
       const previous = framing;

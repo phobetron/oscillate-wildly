@@ -793,10 +793,31 @@ try {
   const stoppedBrush = await webglReadout();
   await page.locator('#pause').click();
   assert.deepEqual(await webglReadout(), stoppedBrush, 'Full brush cannot resume and overwrite its beginning');
+  await webglChange('#accumulation-length', 0);
+  await webglChange('#paint-limit-behavior', 'trim-oldest');
+  assert.equal(await page.locator('#paint-limit-behavior').inputValue(), 'pause', 'Failed remount restores the applied limit policy');
+  assert.deepEqual(await webglReadout(), stoppedBrush, 'Invalid remount preserves the paused paint controller');
+  await page.locator('#pause').click();
+  assert.deepEqual(await webglReadout(), stoppedBrush, 'Failed trim switch keeps the full-paint resume guard');
+  await webglChange('#accumulation-length', 3);
   assert.equal((await webglClick('#clear-drawing')).count, 0, 'Clear removes the completed brush painting');
   assert.doesNotMatch(await page.locator('#status').textContent(), /Paint limit reached/);
+  assert.equal(await page.locator('#paint-limit-behavior').isVisible(), true);
+  assert.equal(await page.locator('#paint-limit-behavior').inputValue(), 'pause');
+  await webglChange('#paint-limit-behavior', 'trim-oldest');
+  const rollingBrush = await animateWebGLFor(0.25);
+  assert.ok(rollingBrush.count > 0, 'Trim mode retains the most recent painted surface');
+  assert.ok((await webglReadout()).time > 0.1, 'Trim mode keeps advancing beyond its three-sample budget');
+  assert.doesNotMatch(await page.locator('#status').textContent(), /Paint limit reached/);
+  const rollingTime = await webglReadout();
+  await webglChange('#webgl-camera', 'oblique');
+  assert.equal((await webglReadout()).time, rollingTime.time, 'Camera redraw does not age rolling paint');
+  assert.equal((await webglChange('#webgl-camera', 'front')).hash, rollingBrush.hash, 'Camera round trip preserves rolling geometry');
+  await animateWebGLFor(0.1);
+  assert.ok((await webglReadout()).time > rollingTime.time, 'A full rolling brush can resume after a manual pause');
   await webglChange('#accumulation-length', 12000);
   await webglChange('#webgl-paint', false);
+  assert.equal(await page.locator('#paint-limit-behavior').isVisible(), false);
 
   await webglChange('#motion', 'duffing');
   await webglChange('#webgl-view', 'spatial');
@@ -1490,6 +1511,54 @@ try {
       check(!limitedPaint.controller.isPaintFull(), 'Clear did not replenish the paint budget');
       limitedPaint.dispose();
 
+      const rollingPaint = fixture([
+        { pose: { x: -0.8 }, marker: brush }, { pose: { x: -0.4 }, marker: brush },
+        { pose: { x: 0 }, marker: brush }, { pose: { x: 0.4 }, marker: brush },
+        { pose: { x: 0.8 }, marker: brush },
+      ], { camera: ribbonCamera, accumulate: false, paint: { maxSamples: 3, limitBehavior: 'trim-oldest' } });
+      rollingPaint.advance(1); rollingPaint.advance(2); rollingPaint.advance(3);
+      rollingPaint.pixel(10, 50, blank, 'Rolling paint discards its evicted beginning');
+      rollingPaint.pixel(24, 50, red, 'The new trailing endpoint has its rounded brush cap');
+      rollingPaint.pixel(22, 59, blank, 'The new trailing endpoint discards circular cap corners');
+      rollingPaint.pixel(50, 50, red, 'Rolling paint preserves its connected body after wrapping');
+      rollingPaint.advance(4);
+      rollingPaint.pixel(30, 50, blank, 'Each new sample trims from the tail end');
+      rollingPaint.pixel(43, 50, red, 'The rounded trailing cap advances with the retained surface');
+      rollingPaint.pixel(47, 57, red, 'Only the endpoint has a cap; retained surface stays smooth');
+      rollingPaint.pixel(80, 50, red, 'The latest paint survives multiple wraps');
+      check(rollingPaint.controller.isPaintFull(), 'Rolling brush should report its filled retention budget');
+      rollingPaint.controller.resume();
+      check(!rollingPaint.controller.isPaused() && rollingPaint.scheduled === 1, 'A full rolling brush should resume');
+      rollingPaint.controller.pause();
+      const rollingFlat = rollingPaint.rgba(50, 50);
+      rollingPaint.controller.setLighting(true);
+      check(rollingPaint.rgba(50, 50)[3] === 255, 'Rolling tail caps retain lighting coverage');
+      rollingPaint.controller.setLighting(false);
+      check(rollingPaint.rgba(50, 50).every((value, channel) => value === rollingFlat[channel]), 'Lighting redraw does not age rolling paint');
+      rollingPaint.controller.setCamera(camera);
+      rollingPaint.pixel(50, 50, blank, 'Rolling caps keep their world-space orientation');
+      rollingPaint.controller.setCamera(ribbonCamera);
+      rollingPaint.pixel(43, 50, red, 'Camera round trip restores rolling paint');
+      const restoreRolling = await lose(rollingPaint);
+      await restoreRolling();
+      rollingPaint.pixel(30, 50, blank, 'Context recovery does not resurrect evicted paint');
+      rollingPaint.pixel(43, 50, red, 'Context recovery restores the rolling tail cap');
+      rollingPaint.controller.clear();
+      rollingPaint.pixel(80, 50, blank, 'Clear removes rolling paint');
+      check(!rollingPaint.controller.isPaintFull(), 'Clear resets rolling capacity state');
+      rollingPaint.dispose();
+
+      const rollingGap = fixture([
+        { pose: { x: -0.8 }, marker: brush }, { pose: { x: -0.6 }, marker: brush },
+        { pose: { x: 0 }, skip: true }, { pose: { x: 0.6 }, marker: brush },
+        { pose: { x: 0.8 }, marker: brush },
+      ], { camera: ribbonCamera, accumulate: false, paint: { maxSamples: 3, limitBehavior: 'trim-oldest' } });
+      rollingGap.advance(1); rollingGap.advance(2); rollingGap.advance(3); rollingGap.advance(4);
+      rollingGap.pixel(20, 50, red, 'Eviction into a gap preserves the isolated earlier endpoint');
+      rollingGap.pixel(50, 50, blank, 'Rolling paint never bridges a lifted brush');
+      rollingGap.pixel(85, 50, red, 'The later retained stroke remains connected');
+      rollingGap.dispose();
+
       const styledPaint = fixture([
         { pose: { x: -0.8 }, marker: { ...brush, color: [1, 0, 0] } },
         { pose: { x: -0.4 }, marker: { ...brush, color: [1, 0, 0] } },
@@ -1510,6 +1579,16 @@ try {
       crossingPaint.advance(1); crossingPaint.advance(2); crossingPaint.advance(3);
       crossingPaint.pixel(50, 50, green, 'New crossing paint covers an older starting cap at equal depth');
       crossingPaint.dispose();
+      const rollingCrossing = fixture([
+        { pose: { x: -0.9, y: 0.9 } },
+        { pose: { x: 0, y: 0 }, marker: { ...brush, color: [1, 0, 0] } },
+        { pose: { x: 0.6, y: 0 }, marker: { ...brush, color: [1, 0, 0] } },
+        { pose: { x: 0.6, y: 0.6 }, marker: { ...brush, color: [0, 1, 0] } },
+        { pose: { x: -0.6, y: -0.6 }, marker: { ...brush, color: [0, 1, 0] } },
+      ], { camera, accumulate: false, paint: { maxSamples: 4, limitBehavior: 'trim-oldest' } });
+      for (let index = 1; index <= 4; index++) rollingCrossing.advance(index);
+      rollingCrossing.pixel(50, 50, green, 'Wrapped paint draws in chronological order at equal depth');
+      rollingCrossing.dispose();
       for (const z of [4.5, -5]) {
         const clipped = fixture([{ pose: { z } }], { camera });
         clipped.pixel(50, 50, blank, `Camera near/far clipping at z=${z}`);

@@ -118,6 +118,9 @@ const webglShape = required<HTMLSelectElement>('#webgl-shape');
 const webglLighting = required<HTMLInputElement>('#webgl-lighting');
 const webglAccumulate = required<HTMLInputElement>('#webgl-accumulate');
 const webglPaint = required<HTMLInputElement>('#webgl-paint');
+const paintLimitBehavior = required<HTMLSelectElement>('#paint-limit-behavior');
+const paintLimitBehaviorControl = required<HTMLElement>('#paint-limit-behavior-control');
+let mountedPaintLimitBehavior = paintLimitBehavior.value;
 const accumulationLengthInput = required<HTMLInputElement>('#accumulation-length');
 const clearDrawingButton = required<HTMLButtonElement>('#clear-drawing');
 const webglNote = required<HTMLElement>('#webgl-note');
@@ -295,6 +298,8 @@ const updateAvailability = (motion: Pick<MotionSource<unknown>, 'kind'>): void =
   for (const control of [webglShape, webglAccumulate, webglPaint, clearDrawingButton]) control.disabled = !webgl;
   webglLighting.disabled = !canOrbit;
   const painting = webglPaint.checked;
+  paintLimitBehaviorControl.hidden = !webgl || !painting;
+  paintLimitBehavior.disabled = !webgl || !painting;
   accumulationLengthInput.disabled = !webgl || (!webglAccumulate.checked && !painting);
   webglNote.textContent = !webgl
     ? 'Choose WebGL for 3D Lissajous, Helix, Lorenz, or Duffing phase space.'
@@ -302,7 +307,9 @@ const updateAvailability = (motion: Pick<MotionSource<unknown>, 'kind'>): void =
       ? 'Duffing phase space: radius shows displacement, height shows velocity, and angle shows forcing phase. Retained drawing rotates with the camera. Sample limits bound retained geometry. Clear keeps time; reset restarts it.'
       : 'Lissajous, Helix, and Lorenz offer XYZ motion. Retained drawing rotates with the camera. Sample limits bound retained geometry. Clear keeps motion time; reset restarts it. Drawing is opaque.';
   if (canOrbit) webglNote.textContent += ' Drag with a mouse or one finger to orbit; arrow keys also rotate the view. Choose a camera preset to restore its angle.';
-  if (painting && webgl) webglNote.textContent += ' Ribbon paint stays until cleared; reaching its limit pauses the animation.';
+  if (painting && webgl) webglNote.textContent += paintLimitBehavior.value === 'pause'
+    ? ' Ribbon paint stays until cleared; reaching its limit pauses the animation.'
+    : ' At the ribbon paint limit, motion continues and the oldest paint is replaced.';
   trailInput.disabled = dom;
   trailLengthInput.disabled = dom || !trailInput.checked;
   pathInput.disabled = dom || webgl || motion.kind !== 'analytic';
@@ -310,7 +317,7 @@ const updateAvailability = (motion: Pick<MotionSource<unknown>, 'kind'>): void =
   visualNote.textContent = dom
     ? 'DOM moves your styled marker; Canvas, SVG, and WebGL provide optional trails. Full paths are available for periodic motions on Canvas and SVG.'
     : webgl
-      ? `${tailNote} Paint ribbon uses the marker radius and retains the entire stroke until cleared. Its paint limit pauses motion without discarding earlier paint. Marker-size scale and view depth are independent.`
+      ? `${tailNote} Paint ribbon uses the marker radius. At sample limit either pauses motion and preserves paint or trims the oldest paint as motion continues. Marker-size scale and view depth are independent.`
       : `${tailNote} Full paths ${motion.kind === 'stateful' ? 'require a periodic motion' : 'use cached geometry'}.`;
 };
 
@@ -419,7 +426,9 @@ const updateStatus = (): void => {
   const trail = selectedRenderer !== 'webgl' && selectedRenderer !== 'dom' && trailInput.checked
     ? ` ${trailDescription()}.` : '';
   status.textContent = `${motionSelect.selectedOptions[0].text} on ${rendererTabs.find((tab) => tab.dataset.renderer === selectedRenderer)!.textContent!.trim()}; ${fitSelect.value} at ${zoomInput.value}×, position ${offsetXValue.value}/${offsetYValue.value}, ${overflow}.${webgl}${trail}`;
-  if (webglController?.isPaintFull() && webglPaint.checked) status.textContent += ' Paint limit reached; clear or reset to paint again.';
+  if (webglController?.isPaintFull() && webglPaint.checked) status.textContent += paintLimitBehavior.value === 'pause'
+    ? ' Paint limit reached; clear or reset to paint again.'
+    : ' Paint capacity reached; the oldest paint is replaced as motion continues.';
 };
 
 const mount = (): boolean => {
@@ -460,7 +469,7 @@ const mount = (): boolean => {
         framing, autoplay: !manuallyPaused, lighting: spatialView() && webglLighting.checked,
         camera: cameraForView(), accumulate: webglAccumulate.checked ? { maxSamples: accumulationMaxSamples } : false,
         trail: trailInput.checked ? { maxSamples, width: 2 } : false,
-        paint: webglPaint.checked ? { maxSamples: accumulationMaxSamples } : false,
+        paint: webglPaint.checked ? { maxSamples: accumulationMaxSamples, limitBehavior: paintLimitBehavior.value as 'pause' | 'trim-oldest' } : false,
         onPaintLimit() {
           manuallyPaused = true;
           pauseButton.textContent = 'Resume';
@@ -509,6 +518,7 @@ const mount = (): boolean => {
         } } : {}),
       });
     }
+    mountedPaintLimitBehavior = paintLimitBehavior.value;
     pauseButton.textContent = manuallyPaused ? 'Resume' : 'Pause';
     updateStatus();
     return true;
@@ -622,6 +632,12 @@ webglAccumulate.addEventListener('change', () => {
   mount();
 });
 accumulationLengthInput.addEventListener('change', mount);
+paintLimitBehavior.addEventListener('change', () => {
+  if (!mount()) {
+    paintLimitBehavior.value = mountedPaintLimitBehavior;
+    updateAvailability({ kind: activeMotionKind });
+  }
+});
 webglPaint.addEventListener('change', () => {
   if (webglPaint.checked) { trailInput.checked = false; webglAccumulate.checked = false; }
   mount();
@@ -700,7 +716,7 @@ for (const input of Object.values(boundsInputs)) input.addEventListener('change'
 
 pauseButton.addEventListener('click', () => {
   if (!controller) return;
-  if (webglPaint.checked && webglController?.isPaintFull()) { updateStatus(); return; }
+  if (webglPaint.checked && paintLimitBehavior.value === 'pause' && webglController?.isPaintFull()) { updateStatus(); return; }
   if (manuallyPaused) {
     controller.resume();
     manuallyPaused = false;
@@ -735,6 +751,7 @@ defaultsButton.addEventListener('click', () => {
   webglLighting.checked = false;
   webglAccumulate.checked = false;
   webglPaint.checked = false;
+  paintLimitBehavior.value = 'pause';
   accumulationLengthInput.value = '12000';
   customBounds.checked = false;
   for (const input of Object.values(boundsInputs)) input.disabled = true;

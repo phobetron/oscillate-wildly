@@ -75,6 +75,9 @@
                 <label id="path-control" class="check-label" data-renderers="canvas svg" data-analytic-only hidden><input id="show-path" type="checkbox" /> Show full path</label>
                 <label class="check-label" data-renderers="webgl"><input id="webgl-accumulate" type="checkbox" /> Accumulate drawing</label>
                 <label class="check-label" data-renderers="webgl"><input id="webgl-paint" type="checkbox" /> Paint ribbon</label>
+                <label id="paint-limit-behavior-control" data-renderers="webgl" hidden>At sample limit
+                  <select id="paint-limit-behavior"><option value="pause" selected>Pause</option><option value="trim-oldest">Trim oldest</option></select>
+                </label>
                 <label data-renderers="webgl">Retained samples / paint limit <input id="accumulation-length" type="number" min="1" step="1" value="12000" required disabled aria-describedby="webgl-note" /></label>
                 <p id="visual-note" class="control-note">Trails are available for Canvas, SVG, and WebGL. Full paths require a periodic motion on Canvas or SVG.</p>
               </fieldset>
