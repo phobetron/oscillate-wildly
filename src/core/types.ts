@@ -12,7 +12,7 @@ export interface Pose {
   readonly y: number;
   /** Optional world-space coordinate, independent of marker scale. */
   readonly z?: number;
-  /** Positive, bounded marker scale for renderers that support depth. */
+  /** Nonnegative marker-size multiplier, independent of geometric or clipping depth. */
   readonly depth?: number;
   readonly opacity?: number;
 }
@@ -21,6 +21,8 @@ export interface Pose {
 export interface MotionSample<State> {
   readonly state: State;
   readonly pose: Pose;
+  /** Identity of a continuous path. A changed value prevents connecting across a jump. */
+  readonly pathSegment?: number;
 }
 
 export interface AnalyticMotionSource<State> {
@@ -46,6 +48,16 @@ export type MotionSource<State> =
 export interface Viewport {
   readonly width: number;
   readonly height: number;
+}
+
+/** Shared marker presentation, applied after motion interpolation and before rendering. */
+export interface MarkerScaleOptions {
+  /** Amplifies deviation from base marker size (scale 1). 0 disables variation; defaults to 1. */
+  readonly depthStrength?: number;
+  /** Lower marker-size clamp, finite and nonnegative. Defaults to 0. */
+  readonly minMarkerScale?: number;
+  /** Upper marker-size clamp, finite and at least the minimum. Omit for no upper limit. */
+  readonly maxMarkerScale?: number;
 }
 
 export type FrameFit = 'cover' | 'contain' | 'stretch';
@@ -78,5 +90,6 @@ export interface Frame<State> {
   readonly position: ProjectedPose;
   readonly viewport: Viewport;
   readonly elapsedSeconds: number;
+  readonly pathSegment?: number;
   project(pose: Pose): ProjectedPose;
 }

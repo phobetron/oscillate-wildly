@@ -9,6 +9,11 @@ import {
   createVanderPolMotion,
 } from '../../src/motions';
 import { createController } from '../../src/runtime';
+import { projectOrthographic, type OrthographicCamera } from '../../src/core';
+import type { HelixFlowDirection, HelixRotationDirection } from '../../src/motions';
+
+const helixFlows: readonly HelixFlowDirection[] = ['top-to-bottom', 'bottom-to-top', 'left-to-right', 'right-to-left'];
+const helixRotations: readonly HelixRotationDirection[] = ['counter-clockwise', 'clockwise'];
 
 test('analytic factories expose repeatable samples and periods', () => {
   const ellipse = createEllipseMotion();
@@ -37,7 +42,97 @@ test('helix makes four turns in 12 seconds and fades through its loop boundary',
   expect(quarter.pose.depth).toBeCloseTo(0.625);
   expect(quarter.pose.opacity).toBe(1);
   expect(helix.sample(0.3).pose.opacity).toBeCloseTo(0.5);
-  expect(helix.sample(12)).toEqual(helix.sample(0));
+  expect(helix.sample(12)).toEqual({ ...helix.sample(0), pathSegment: 1 });
+});
+
+test('helix direction defaults preserve the original samples exactly', () => {
+  const defaults = createHelixMotion();
+  const explicit = createHelixMotion({ rotationDirection: 'counter-clockwise', flowDirection: 'top-to-bottom' });
+  for (const time of [-1, 0, 0.1, 0.3, 3, 5.5, 11.999, 12, 12.5, 24.1]) {
+    const remainder = time % 12;
+    const wrapped = remainder < 0 ? remainder + 12 : remainder;
+    const progress = wrapped / 12;
+    const angleRadians = progress * 4 * Math.PI * 2;
+    const x = Math.cos(angleRadians);
+    const y = Math.sin(angleRadians);
+    const z = 0.5 * angleRadians / (Math.PI * 2);
+    const opacity = progress < 0.05 ? progress / 0.05 : progress > 0.95 ? (1 - progress) / 0.05 : 1;
+    expect(defaults.sample(time)).toEqual({
+      state: { elapsedSeconds: wrapped, angleRadians, x, y, z },
+      pose: { x, y: z, depth: 0.25 + 0.75 * (y + 1) / 2, opacity },
+      pathSegment: Math.round((time - wrapped) / 12),
+    });
+    expect(explicit.sample(time)).toEqual(defaults.sample(time));
+  }
+});
+
+test('helix rotation and flow remain independent across all eight combinations', () => {
+  for (const flowDirection of helixFlows) {
+    const horizontal = flowDirection === 'left-to-right' || flowDirection === 'right-to-left';
+    const reverse = flowDirection === 'bottom-to-top' || flowDirection === 'right-to-left';
+    const forward = createHelixMotion({ flowDirection });
+    for (const rotationDirection of helixRotations) {
+      const motion = createHelixMotion({ flowDirection, rotationDirection });
+      expect(motion.bounds).toEqual(horizontal
+        ? { minX: 0, maxX: 2, minY: -1, maxY: 1 }
+        : { minX: -1, maxX: 1, minY: 0, maxY: 2 });
+      const first = motion.sample(0).state;
+      const quarter = motion.sample(0.75).state;
+      // Signed radial cross product verifies the sense of rotation about the axis.
+      const orientation = horizontal
+        ? first.y * quarter.z - first.z * quarter.y
+        : first.x * quarter.y - first.y * quarter.x;
+      expect(orientation).toBeCloseTo(rotationDirection === 'clockwise' ? -1 : 1, 12);
+      const early = motion.sample(0.3).state;
+      const later = motion.sample(3.3).state;
+      expect((horizontal ? later.x - early.x : later.z - early.z)).toBeCloseTo(reverse ? -0.5 : 0.5, 12);
+      for (let index = 0; index < 100; index += 1) {
+        const time = index * 0.12;
+        const sample = motion.sample(time);
+        const native = forward.sample(time);
+        expect(sample.pose.x).toBe(native.pose.x);
+        expect(sample.pose.y).toBe(native.pose.y);
+        expect(sample.pose.opacity).toBe(native.pose.opacity);
+        expect(sample.pathSegment).toBe(native.pathSegment);
+        expect(sample.pose.x).toBeGreaterThanOrEqual(motion.bounds.minX);
+        expect(sample.pose.x).toBeLessThanOrEqual(motion.bounds.maxX);
+        expect(sample.pose.y).toBeGreaterThanOrEqual(motion.bounds.minY);
+        expect(sample.pose.y).toBeLessThanOrEqual(motion.bounds.maxY);
+        expect(Math.hypot(sample.state.y, horizontal ? sample.state.z : sample.state.x)).toBeCloseTo(1, 12);
+        if (rotationDirection === 'clockwise') expect(sample.pose.depth! + native.pose.depth!).toBeCloseTo(1.25, 12);
+        else expect(sample.pose.depth).toBe(native.pose.depth);
+      }
+      const beforeWrap = motion.sample(11.999);
+      const afterWrap = motion.sample(12.001);
+      expect(beforeWrap.pathSegment).toBe(0);
+      expect(afterWrap.pathSegment).toBe(1);
+      expect(Math.abs((horizontal ? afterWrap.pose.x - beforeWrap.pose.x : afterWrap.pose.y - beforeWrap.pose.y))).toBeGreaterThan(1.9);
+    }
+  }
+});
+
+test('helix flow names match the planar pose and canonical Front camera', () => {
+  for (const flowDirection of helixFlows) {
+    const horizontal = flowDirection === 'left-to-right' || flowDirection === 'right-to-left';
+    const motion = createHelixMotion({ flowDirection });
+    const camera: OrthographicCamera = horizontal
+      ? { target: { x: 1, y: 0, z: 0 }, position: { x: 1, y: -7, z: 0 }, up: { x: 0, y: 0, z: 1 }, bounds: { minX: -2, maxX: 2, minY: -2, maxY: 2 } }
+      : { target: { x: 0, y: 0, z: 1 }, position: { x: 0, y: 7, z: 1 }, up: { x: 0, y: 0, z: -1 }, bounds: { minX: -2, maxX: 2, minY: -2, maxY: 2 } };
+    const early = motion.sample(0.3);
+    const later = motion.sample(3.3);
+    const a = projectOrthographic(early.state, { width: 200, height: 200 }, camera, { fit: 'contain', padding: 0 });
+    const b = projectOrthographic(later.state, { width: 200, height: 200 }, camera, { fit: 'contain', padding: 0 });
+    const delta = horizontal ? b.x - a.x : b.y - a.y;
+    expect(delta).toBeCloseTo(flowDirection === 'bottom-to-top' || flowDirection === 'right-to-left' ? -25 : 25, 12);
+    expect((horizontal ? later.pose.x - early.pose.x : later.pose.y - early.pose.y)).toBeCloseTo(delta / 50, 12);
+  }
+});
+
+test('helix rejects unrecognized rotation and flow directions', () => {
+  for (const value of ['', 'left', 'CLOCKWISE', 1, false]) {
+    expect(() => createHelixMotion({ rotationDirection: value as HelixRotationDirection })).toThrow(/rotationDirection/);
+    expect(() => createHelixMotion({ flowDirection: value as HelixFlowDirection })).toThrow(/flowDirection/);
+  }
 });
 
 test('analytic period parameters always close their paths', () => {
@@ -47,6 +142,39 @@ test('analytic period parameters always close their paths', () => {
   expect(rose.sample(rose.periodSeconds)).toEqual(rose.sample(0));
   expect(lissajous.sample(lissajous.periodSeconds)).toEqual(lissajous.sample(0));
   expect(() => createLissajousMotion({ cyclesX: 1.5 })).toThrow(RangeError);
+});
+
+test('helix identifies separate loops without splitting continuous closed motions', () => {
+  const helix = createHelixMotion({ periodSeconds: 2 });
+  expect(helix.sample(0).pathSegment).toBe(0);
+  expect(helix.sample(1.999).pathSegment).toBe(0);
+  expect(helix.sample(2).pathSegment).toBe(1);
+  expect(helix.sample(2.001).pathSegment).toBe(1);
+  expect(helix.sample(8.001).pathSegment).toBe(4);
+  expect(helix.sample(-0.001).pathSegment).toBe(-1);
+  expect(helix.sample(-2).pathSegment).toBe(-1);
+  expect(helix.sample(2).pose).toEqual(helix.sample(0).pose);
+  for (const motion of [createEllipseMotion(), createRoseMotion(), createLissajousMotion()]) {
+    expect(motion.sample(0).pathSegment).toBeUndefined();
+    expect(motion.sample(motion.periodSeconds).pathSegment).toBeUndefined();
+  }
+});
+
+test('helix path identity changes with the actual wrap at repeated fractional periods', () => {
+  const helix = createHelixMotion({ periodSeconds: 0.1, turns: 1 });
+  expect(helix.sample(0.49).pathSegment).toBe(4);
+  expect(helix.sample(0.5).pathSegment).toBe(4);
+  expect(helix.sample(0.51).pathSegment).toBe(5);
+  for (const periodSeconds of [0.1, 0.18, 1.2]) {
+    const motion = createHelixMotion({ periodSeconds });
+    let previous = motion.sample(0);
+    for (let index = 1; index <= 1000; index += 1) {
+      const current = motion.sample(index * periodSeconds / 10);
+      const jumped = current.state.elapsedSeconds < previous.state.elapsedSeconds;
+      expect(current.pathSegment !== previous.pathSegment).toBe(jumped);
+      previous = current;
+    }
+  }
 });
 
 test('Lissajous exposes default and custom depth cycles with closed, wrapped samples', () => {

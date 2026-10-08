@@ -1,6 +1,6 @@
 {
   "name": "oscillate-wildly",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Animated oscillators, parametric curves, and attractors for the web.",
   "type": "module",
   "license": "MIT",

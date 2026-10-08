@@ -55,4 +55,43 @@ describe('trail history', () => {
       expect(() => createTrailHistory(capacity)).toThrow(RangeError);
     }
   });
+
+  it('retains separate adjacent paths within one sample budget through ring rotation', () => {
+    const history = createTrailHistory<string>(4);
+    history.add('a', 1, 0);
+    history.add('b', 2, 0);
+    history.add('c', 3, 1);
+    history.add('d', 4, 1);
+    expect(history.segments()).toEqual([['a', 'b'], ['c', 'd']]);
+    history.add('e', 5, 2);
+    expect(history.values()).toEqual(['b', 'c', 'd', 'e']);
+    expect(history.segments()).toEqual([['b'], ['c', 'd'], ['e']]);
+    history.add('f', 6, 2);
+    expect(history.segments()).toEqual([['c', 'd'], ['e', 'f']]);
+    history.add('redraw', 6, 2);
+    expect(history.size).toBe(4);
+    expect(history.segments()).toEqual([['c', 'd'], ['e', 'redraw']]);
+    // Returning to an earlier identifier still starts a new adjacent run.
+    history.add('g', 7, 1);
+    expect(history.segments()).toEqual([['d'], ['e', 'redraw'], ['g']]);
+  });
+
+  it('clears path metadata on reset and supports unchanged or single-sample paths', () => {
+    const history = createTrailHistory<number>(2);
+    expect(history.segments()).toEqual([]);
+    history.add(1, 1, 1);
+    history.add(2, 2, 2);
+    history.add(0, 0, 0);
+    expect(history.segments()).toEqual([[0]]);
+    history.clear();
+    history.add(3, 1);
+    history.add(4, 2);
+    expect(history.segments()).toEqual([[3, 4]]);
+    history.add(40, 2, 1);
+    expect(history.segments()).toEqual([[3], [40]]);
+    const single = createTrailHistory<number>(1);
+    single.add(1, 1, 0);
+    single.add(2, 2, 1);
+    expect(single.segments()).toEqual([[2]]);
+  });
 });

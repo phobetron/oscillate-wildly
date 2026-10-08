@@ -3,6 +3,8 @@ import { animateWebGL } from '../../src/webgl';
 import type { WebGLFrame } from '../../src/webgl';
 import type { AnalyticMotionSource, OrthographicCamera } from '../../src/core';
 import type { RuntimePlatform } from '../../src/runtime';
+import { createHelixMotion, type HelixState } from '../../src/motions/helix';
+import { createEllipseMotion } from '../../src/motions/ellipse';
 
 type Operation = readonly [string, ...unknown[]];
 
@@ -140,6 +142,84 @@ describe('WebGL adapter', () => {
     return Array.from(gl.uploadedPositions());
   };
   const coordinates = (vertices: number[], axis: number) => vertices.filter((_, index) => index % 3 === axis);
+
+  it('retains Helix tail segments without connecting the end of a cycle to the next start', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const canvas = new Canvas(gl.value);
+    const controller = animateWebGL(canvas.asElement(), createHelixMotion({ periodSeconds: 0.18, turns: 1 }), {
+      platform, trail: { maxSamples: 12, width: 2 }, marker: () => null, framing: { fit: 'stretch', padding: 0 },
+    });
+    platform.fire(0);
+    for (let time = 40; time <= 160; time += 40) platform.fire(time);
+    const oldCycle = uploadedTrail(gl);
+    expect(oldCycle).toHaveLength(72);
+    platform.fire(200); // New cycle has only one point, so it has no connecting strip yet.
+    expect(uploadedTrail(gl)).toEqual(oldCycle);
+    platform.fire(240);
+    controller.pause();
+    const newCycle = uploadedTrail(gl);
+    expect(newCycle).toHaveLength(18);
+    const uploads = gl.operations.filter(([operation]) => operation === 'bufferSubData');
+    expect(Array.from(uploads.at(-2)![3] as Float32Array)).toEqual(oldCycle);
+    controller.setFraming({ fit: 'stretch', padding: 0 });
+    expect(uploadedTrail(gl)).toEqual(newCycle);
+    loss(canvas, gl); restore(canvas, gl);
+    expect(uploadedTrail(gl)).toEqual(newCycle);
+    expect(controller.isPaused()).toBe(true);
+    controller.dispose();
+  });
+
+  it('starts a separate Helix paint stroke at each wrap while retaining earlier deposits', () => {
+    for (const limitBehavior of ['pause', 'trim-oldest'] as const) {
+      for (const spatial of [false, true]) {
+        const gl = fakeGL();
+        const platform = new Platform();
+        const canvas = new Canvas(gl.value);
+        const controller = animateWebGL(canvas.asElement(), createHelixMotion({ periodSeconds: 0.18, turns: 1 }), {
+          platform, paint: { maxSamples: 12, limitBehavior }, marker: { radius: 2 },
+          ...(spatial ? { camera, position: ({ state }: { state: HelixState }) => ({ x: state.x, y: state.y, z: state.z }) } : {}),
+        });
+        platform.fire(0);
+        for (let time = 40; time <= 160; time += 40) platform.fire(time);
+        const oldCycle = gl.uploadedBuffer().slice(0, 5 * 108);
+        platform.fire(200);
+        const atWrap = gl.uploadedBuffer();
+        expect(atWrap.slice(0, 5 * 108)).toEqual(oldCycle);
+        const strip = atWrap.slice(5 * 108, 5 * 108 + 54);
+        const xyz = [0, 1, 2].map((axis) => strip.filter((_, index) => index % 9 === axis));
+        for (const channel of xyz) expect(new Set(channel).size).toBe(1); // A dab, without a bridge to the old endpoint.
+        platform.fire(240);
+        controller.pause();
+        const after = gl.uploadedBuffer();
+        const nextStrip = after.slice(6 * 108, 6 * 108 + 54);
+        expect(new Set(nextStrip.filter((_, index) => index % 9 === 0)).size).toBeGreaterThan(1);
+        controller.setFraming({ fit: 'stretch' });
+        expect(gl.uploadedBuffer()).toEqual(after);
+        loss(canvas, gl); restore(canvas, gl);
+        expect(gl.uploadedBuffer()).toEqual(after);
+        expect(controller.isPaused()).toBe(true);
+        controller.dispose();
+      }
+    }
+  });
+
+  it('keeps a closed ellipse connected across its period boundary', () => {
+    for (const paint of [false, true]) {
+      const gl = fakeGL();
+      const platform = new Platform();
+      const controller = animateWebGL(new Canvas(gl.value).asElement(), createEllipseMotion({ periodSeconds: 0.18 }), {
+        platform, ...(paint ? { paint: true, marker: { radius: 2 } } : { trail: { maxSamples: 12 }, marker: () => null }),
+      });
+      platform.fire(0);
+      for (let time = 40; time <= 200; time += 40) platform.fire(time);
+      if (paint) {
+        const bridge = gl.uploadedBuffer().slice(5 * 108, 5 * 108 + 54);
+        expect(new Set(bridge.filter((_, index) => index % 9 === 0)).size).toBeGreaterThan(1);
+      } else expect(uploadedTrail(gl)).toHaveLength(90); // Five strips include the continuous period crossing.
+      controller.dispose();
+    }
+  });
 
   it('bounds tail history, copies poses, and does not age it on paused redraws', () => {
     const gl = fakeGL();
@@ -340,6 +420,127 @@ describe('WebGL adapter', () => {
     expect(platform.callbacks.size).toBe(0);
     expect(platform.resize).toBeUndefined();
     expect(platform.visibility).toBeUndefined();
+  });
+
+  it('maps marker scale into appearance and GPU radius without changing geometry or playback', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const frames: WebGLFrame<number>[] = [];
+    let resets = 0;
+    const controller = animateWebGL(new Canvas(gl.value).asElement(), {
+      ...source(), reset: () => { resets++; },
+    }, {
+      platform, visibilityDepth: 0.2, markerScale: { depthStrength: 2, maxMarkerScale: 2.5 },
+      marker: (frame) => { frames.push(frame); return { radius: 7 }; },
+    });
+    const radius = () => gl.operations.filter(([name, uniform]) => name === 'uniform2f' && uniform === 'radius').at(-1)?.slice(2);
+    expect(frames.at(-1)!.pose.depth).toBe(2.5);
+    expect(frames.at(-1)!.position.depth).toBe(2.5);
+    expect(radius()).toEqual([0.175, 0.35]);
+    platform.fire(0); platform.fire(100);
+    const before = frames.at(-1)!;
+    const pending = [...platform.callbacks.keys()];
+    controller.setMarkerScale({ depthStrength: 0 });
+    expect(controller.isPaused()).toBe(false);
+    expect([...platform.callbacks.keys()]).toEqual(pending);
+    expect(frames.at(-1)!.elapsedSeconds).toBe(before.elapsedSeconds);
+    expect(frames.at(-1)!.state).toBe(before.state);
+    expect(frames.at(-1)!.position.x).toBe(before.position.x);
+    expect(frames.at(-1)!.position.visibilityDepth).toBe(0.2);
+    expect(frames.at(-1)!.pose.depth).toBe(1);
+    expect(radius()).toEqual([0.07, 0.14]);
+    controller.pause();
+    controller.setMarkerScale({ depthStrength: 0, minMarkerScale: 1.5 });
+    expect(controller.isPaused()).toBe(true);
+    expect(platform.callbacks.size).toBe(0);
+    expect(frames.at(-1)!.elapsedSeconds).toBe(before.elapsedSeconds);
+    expect(radius()).toEqual([0.105, 0.21]);
+    controller.setMarkerScale({});
+    expect(frames.at(-1)!.pose.depth).toBe(2);
+    expect(radius()).toEqual([0.14, 0.28]);
+    expect(resets).toBe(0);
+    controller.dispose();
+  });
+
+  it('rejects invalid live scale settings while preserving the last rendered frame and scheduling', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const frames: WebGLFrame<number>[] = [];
+    const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+      platform, markerScale: { depthStrength: 0 },
+      marker: (frame) => { frames.push(frame); return {}; },
+    });
+    platform.fire(0); platform.fire(100);
+    const latest = frames.at(-1);
+    const pending = [...platform.callbacks.keys()];
+    const operations = gl.operations.length;
+    for (const options of [{ depthStrength: -1 }, { minMarkerScale: NaN }, { maxMarkerScale: Infinity },
+      { minMarkerScale: 2, maxMarkerScale: 1 }]) {
+      expect(() => controller.setMarkerScale(options)).toThrow(RangeError);
+      expect(frames.at(-1)).toBe(latest);
+      expect(gl.operations.length).toBe(operations);
+      expect([...platform.callbacks.keys()]).toEqual(pending);
+      expect(controller.isPaused()).toBe(false);
+    }
+    platform.fire(200);
+    expect(frames.at(-1)!.pose.depth).toBe(1);
+    expect(frames.at(-1)!.elapsedSeconds).toBeGreaterThan(latest!.elapsedSeconds);
+    controller.dispose();
+  });
+
+  it('replaces only the newest accumulated size on a same-time scale change', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+      platform, accumulate: { maxSamples: 4 }, marker: { radius: 5 },
+    });
+    platform.fire(0); platform.fire(100); platform.fire(200);
+    controller.pause();
+    // Each marker has six vertices of XYZ, local XY, RGB, shape, radius, and visibility depth.
+    const before = gl.uploadedBuffer();
+    expect([9, 75, 141].map((offset) => before[offset])).toEqual([10, 10, 10]);
+    const allocations = gl.count('bufferData');
+    controller.setMarkerScale({ depthStrength: 0 });
+    const after = gl.uploadedBuffer();
+    expect(after).toHaveLength(before.length);
+    expect(after.slice(0, 132)).toEqual(before.slice(0, 132));
+    expect([9, 75, 141].map((offset) => after[offset])).toEqual([10, 10, 5]);
+    expect(after[132]).toBe(before[132]);
+    expect(after[142]).toBe(before[142]);
+    expect(gl.operations.filter(([name]) => name === 'drawArrays').at(-2)?.[3]).toBe(18);
+    controller.setMarkerScale({ depthStrength: 0 });
+    expect(gl.uploadedBuffer()).toEqual(after);
+    expect(gl.count('bufferData')).toBe(allocations);
+    controller.resume();
+    platform.fire(300); platform.fire(400);
+    expect(gl.uploadedBuffer()[207]).toBe(5);
+    controller.dispose();
+  });
+
+  it('preserves deposited paint sizes and uses the new scale for future footprints', () => {
+    const gl = fakeGL();
+    const platform = new Platform();
+    const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+      platform, camera, paint: { maxSamples: 8 }, marker: { radius: 5 },
+    });
+    platform.fire(0); platform.fire(100); platform.fire(200);
+    controller.pause();
+    const before = gl.uploadedBuffer();
+    const uploads = gl.count('bufferSubData');
+    controller.setMarkerScale({ depthStrength: 0 });
+    expect(gl.uploadedBuffer()).toEqual(before);
+    expect(gl.count('bufferSubData')).toBe(uploads);
+    controller.resume();
+    platform.fire(300); platform.fire(400);
+    const after = gl.uploadedBuffer();
+    expect(after.slice(0, 108)).toEqual(before.slice(0, 108));
+    const footprintHeight = (slot: number) => {
+      const ys = after.slice(slot * 108 + 54, (slot + 1) * 108).filter((_, index) => index % 9 === 1);
+      return Math.max(...ys) - Math.min(...ys);
+    };
+    expect(footprintHeight(0)).toBeCloseTo(0.4);
+    expect(footprintHeight(3)).toBeCloseTo(0.2);
+    controller.dispose();
   });
 
   it('clears each frame by default and permits skipping a marker', () => {
@@ -702,12 +903,14 @@ describe('WebGL adapter', () => {
 
   it('clips visibility depth independently of marker scale', () => {
     for (const depth of [-0.1, 1.1]) {
-      const gl = fakeGL();
-      const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
-        autoplay: false, platform: new Platform(), visibilityDepth: depth,
-      });
-      expect(gl.count('drawArrays')).toBe(1);
-      controller.dispose();
+      for (const depthStrength of [0, 10]) {
+        const gl = fakeGL();
+        const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+          autoplay: false, platform: new Platform(), visibilityDepth: depth, markerScale: { depthStrength },
+        });
+        expect(gl.count('drawArrays')).toBe(1);
+        controller.dispose();
+      }
     }
   });
 

@@ -1,3 +1,5 @@
+import { createHelixMotion } from '../../src/motions/helix';
+import { createEllipseMotion } from '../../src/motions/ellipse';
 import { describe, expect, it } from '@rstest/core';
 import { animateCanvas, renderCanvasMarker } from '../../src/canvas';
 import { createCanvasTrail } from '../../src/canvas/trail';
@@ -80,6 +82,49 @@ const frame = (x: number, y: number, elapsedSeconds = x): Frame<undefined> => ({
 });
 
 describe('Canvas helpers', () => {
+  it('retains separate helix strokes across wraps, paused reprojection, and eviction', () => {
+    const motion = createHelixMotion({ periodSeconds: 1, turns: 1 });
+    const drawing = context();
+    const trail = createCanvasTrail({ maxSamples: 4 });
+    const render = (time: number, multiplier = 1) => {
+      drawing.operations.length = 0;
+      const sample = motion.sample(time);
+      trail(drawing.value, {
+        ...frame(0, 0, time), ...sample,
+        project: (pose) => ({ x: pose.x * multiplier, y: pose.y * multiplier, scaleX: multiplier, scaleY: multiplier }),
+      });
+      return drawing.operations.filter(([name]) => name === 'moveTo' || name === 'lineTo');
+    };
+    render(0.75);
+    render(0.875);
+    const wrapped = render(1);
+    expect(wrapped.map(([name]) => name)).toEqual(['moveTo', 'lineTo', 'moveTo']);
+    const advanced = render(1.125);
+    expect(advanced.map(([name]) => name)).toEqual(['moveTo', 'lineTo', 'moveTo', 'lineTo']);
+    expect(render(1.125, 10)).toEqual(advanced.map(([name, x, y]) => [name, x * 10, y * 10]));
+    expect(render(1.125, 10)).toHaveLength(4);
+    expect(render(2).map(([name]) => name)).toEqual(['moveTo', 'moveTo', 'lineTo', 'moveTo']);
+    expect(render(2.125).map(([name]) => name)).toEqual(['moveTo', 'lineTo', 'moveTo', 'lineTo']);
+    expect(render(0)).toEqual([]);
+    trail.clear();
+    expect(render(0.125)).toEqual([]);
+  });
+
+  it('breaks helix full paths at the period endpoint while leaving closed curves continuous', () => {
+    const drawing = context();
+    const helixMotion = createHelixMotion({ periodSeconds: 1, turns: 1 });
+    const helix = createCanvasPath(helixMotion, { maxSegments: 4 });
+    helix(drawing.value, { ...frame(0, 0), ...helixMotion.sample(0) });
+    expect(drawing.operations.filter(([name]) => name === 'moveTo' || name === 'lineTo').map(([name]) => name))
+      .toEqual(['moveTo', 'lineTo', 'lineTo', 'lineTo', 'moveTo']);
+    expect(drawing.operations).toContainEqual(['moveTo', 1, 0]);
+    drawing.operations.length = 0;
+    const ellipse = createEllipseMotion();
+    createCanvasPath(ellipse, { maxSegments: 4 })(drawing.value, { ...frame(0, 0), ...ellipse.sample(0) });
+    expect(drawing.operations.filter(([name]) => name === 'moveTo')).toHaveLength(1);
+    expect(drawing.operations.filter(([name]) => name === 'lineTo')).toHaveLength(4);
+  });
+
   it('reprojects paused history without evicting samples and snapshots mutable poses', () => {
     const drawing = context();
     const trail = createCanvasTrail<undefined>({ maxSamples: 2 });

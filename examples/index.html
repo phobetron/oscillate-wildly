@@ -26,7 +26,12 @@
                 <legend>Motion source</legend>
                 <label>Motion
                   <select id="motion">
-                    <option value="duffing">Duffing</option><option value="ellipse" selected>Ellipse</option><option value="helix">Helix</option><option value="lissajous">Lissajous</option><option value="lorenz">Lorenz</option><option value="rose">Rose</option><option value="vander-pol">Van der Pol</option>
+                    <optgroup label="True 3D">
+                      <option value="helix">Helix</option><option value="lissajous">Lissajous</option><option value="lorenz">Lorenz</option>
+                    </optgroup>
+                    <optgroup label="Other motions">
+                      <option value="duffing">Duffing</option><option value="ellipse">Ellipse</option><option value="rose">Rose</option><option value="vander-pol">Van der Pol</option>
+                    </optgroup>
                   </select>
                 </label>
                 <div id="parameter-controls" class="field-grid"></div>
@@ -34,10 +39,10 @@
               <fieldset id="projection-config">
                 <legend>Projection and framing</legend>
                 <label id="coordinates-control" data-renderers="webgl">Coordinates
-                  <select id="webgl-view" aria-describedby="webgl-note"><option value="spatial">3D coordinates</option><option value="planar" selected>Planar</option></select>
+                  <select id="webgl-view" aria-describedby="webgl-note"><option value="spatial">3D coordinates</option><option value="planar">Planar</option></select>
                 </label>
                 <label>Fit
-                  <select id="fit"><option value="contain">Contain</option><option value="cover" selected>Cover</option><option value="stretch">Stretch</option></select>
+                  <select id="fit"><option value="contain">Contain</option><option value="cover">Cover</option><option value="stretch">Stretch</option></select>
                 </label>
                 <label>Zoom <output id="zoom-value" for="zoom">1.0×</output>
                   <input id="zoom" type="range" min="0.5" max="1.5" value="1" step="0.1" />
@@ -63,6 +68,11 @@
                   <label>Marker radius <output id="marker-size-value" for="marker-size">9 px</output>
                     <input id="marker-size" type="range" min="3" max="24" value="9" step="1" />
                   </label>
+                  <label>Depth strength <input id="depth-strength" type="number" min="0" step="any" value="1" required aria-describedby="marker-scale-note" /></label>
+                  <label class="check-label"><input id="clamp-marker-scale" type="checkbox" /> Clamp marker scale</label>
+                  <label>Minimum marker scale <input id="min-marker-scale" type="number" min="0" step="any" value="0.25" required disabled aria-describedby="marker-scale-note" /></label>
+                  <label>Maximum marker scale <input id="max-marker-scale" type="number" min="0" step="any" value="1" required disabled aria-describedby="marker-scale-note" /></label>
+                  <p id="marker-scale-note" class="control-note">Depth strength varies size around the base marker radius; zero keeps the base size. Optional clamps bound the size multiplier for every motion. Rose and Van der Pol have no size depth cue.</p>
                   <label id="marker-shape-control" data-renderers="webgl">Marker shape
                     <select id="webgl-shape"><option value="circle" selected>Circle</option><option value="square">Square</option></select>
                   </label>

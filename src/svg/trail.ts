@@ -30,14 +30,16 @@ export const createSvgTrail = <State>(options: SvgTrailOptions): SvgTrail<State>
   let disposed = false;
 
   const write = (frame: Frame<State>): void => {
-    const points = history.values().map((pose) => cssPointToSvgPoint(viewport, frame.project(pose), path));
-    path.setAttribute('d', svgPathData(points));
+    const subpaths = history.segments().map((samples) => svgPathData(
+      samples.map((pose) => cssPointToSvgPoint(viewport, frame.project(pose), path)),
+    ));
+    path.setAttribute('d', subpaths.join(' '));
   };
 
   return {
     render(frame): void {
       if (disposed) return;
-      history.add({ ...frame.pose }, frame.elapsedSeconds);
+      history.add({ ...frame.pose }, frame.elapsedSeconds, frame.pathSegment);
       write(frame);
     },
     clear(): void {

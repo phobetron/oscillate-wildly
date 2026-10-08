@@ -1,6 +1,6 @@
 import { createController } from '../runtime';
 import type { Controller, Frame } from '../runtime';
-import type { Framing, MotionSource } from '../core';
+import type { Framing, MarkerScaleOptions, MotionSource } from '../core';
 
 /** A Canvas 2D render callback. Coordinates are CSS pixels. */
 export type CanvasRenderer<State> = (
@@ -17,6 +17,7 @@ export interface CanvasMarkerOptions {
 
 export interface AnimateCanvasOptions<State> {
   readonly framing?: Framing;
+  readonly markerScale?: MarkerScaleOptions;
   readonly autoplay?: boolean;
   /** Lets the controller stop work while the canvas is outside the viewport. */
   readonly offscreen?: boolean;
@@ -77,6 +78,7 @@ export const animateCanvas = <State>(
     source: motion,
     measureViewport: () => cssViewport(canvas),
     framing: options.framing,
+    markerScale: options.markerScale,
     autoplay: options.autoplay,
     offscreen: options.offscreen ?? true,
     render: (frame: Frame<State>) => {

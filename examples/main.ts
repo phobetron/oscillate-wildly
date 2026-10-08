@@ -10,7 +10,10 @@ import {
   type DuffingState,
   type FrameFit,
   type Framing,
+  type HelixRotationDirection,
+  type HelixFlowDirection,
   type MotionSource,
+  type MarkerScaleOptions,
   type OrthographicCamera,
   type Point3D,
 } from '../src';
@@ -29,48 +32,59 @@ import './styles.css';
 
 type MotionName = 'ellipse' | 'rose' | 'lissajous' | 'helix' | 'vander-pol' | 'duffing' | 'lorenz';
 type RendererName = 'canvas' | 'webgl' | 'dom' | 'svg';
-type Parameter = { key: string; label: string; value: number; step?: number; min?: number; max?: number };
+type Parameter = {
+  key: string; label: string; value: number; step?: number; min?: number; max?: number;
+  minExclusive?: boolean; maxExclusive?: boolean; description?: string;
+};
+const positiveRange = { min: 0, minExclusive: true } as const;
+const runawayLimitParameter: Parameter = {
+  key: 'runawayLimit', label: 'Runaway state limit', value: 1_000_000, ...positiveRange,
+  description: "Reset the motion if any model state's absolute value exceeds this limit.",
+};
 
 const parameterDefinitions: Record<MotionName, readonly Parameter[]> = {
   ellipse: [
-    { key: 'periodSeconds', label: 'Period (seconds)', value: 15, min: 1, step: 0.5 },
-    { key: 'radiusX', label: 'Horizontal radius', value: 1, min: 0.1, step: 0.05 },
-    { key: 'radiusY', label: 'Vertical radius', value: 1, min: 0.1, step: 0.05 },
+    { key: 'periodSeconds', label: 'Period (seconds)', value: 15, ...positiveRange },
+    { key: 'radiusX', label: 'Horizontal radius', value: 1, ...positiveRange },
+    { key: 'radiusY', label: 'Vertical radius', value: 1, ...positiveRange },
   ],
-  rose: [{ key: 'periodSeconds', label: 'Period (seconds)', value: 15 * Math.PI, min: 1 }],
+  rose: [{ key: 'periodSeconds', label: 'Period (seconds)', value: 15 * Math.PI, ...positiveRange }],
   lissajous: [
-    { key: 'periodSeconds', label: 'Period (seconds)', value: 60, min: 1, step: 1 },
-    { key: 'cyclesX', label: 'Horizontal cycles', value: 5, min: 1, max: 20, step: 1 },
-    { key: 'cyclesY', label: 'Vertical cycles', value: 4, min: 1, max: 20, step: 1 },
-    { key: 'cyclesZ', label: 'Z cycles', value: 3, min: 1, max: 20, step: 1 },
+    { key: 'periodSeconds', label: 'Period (seconds)', value: 60, ...positiveRange },
+    { key: 'cyclesX', label: 'Horizontal cycles', value: 5, min: 1, max: Number.MAX_SAFE_INTEGER, step: 1 },
+    { key: 'cyclesY', label: 'Vertical cycles', value: 4, min: 1, max: Number.MAX_SAFE_INTEGER, step: 1 },
+    { key: 'cyclesZ', label: 'Z cycles', value: 3, min: 1, max: Number.MAX_SAFE_INTEGER, step: 1 },
   ],
   helix: [
-    { key: 'periodSeconds', label: 'Period (seconds)', value: 12, min: 1, step: 0.5 },
-    { key: 'turns', label: 'Turns', value: 4, min: 1, max: 12, step: 1 },
-    { key: 'fadeFraction', label: 'End fade fraction', value: 0.05, min: 0.01, max: 0.45, step: 0.01 },
+    { key: 'periodSeconds', label: 'Period (seconds)', value: 12, ...positiveRange },
+    { key: 'turns', label: 'Turns', value: 4, ...positiveRange },
+    { key: 'fadeFraction', label: 'End fade fraction', value: 0.05, ...positiveRange, max: 0.5, maxExclusive: true },
   ],
   'vander-pol': [
-    { key: 'mu', label: 'Nonlinearity μ', value: 1, min: 0, step: 0.1 },
-    { key: 'timeScale', label: 'Playback speed', value: 2.4, min: 0.01, step: 0.1 },
-    { key: 'initialX', label: 'Initial X', value: 1, step: 0.1 },
-    { key: 'initialY', label: 'Initial Y', value: 1, step: 0.1 },
+    { key: 'mu', label: 'Nonlinearity μ', value: 1 },
+    { key: 'timeScale', label: 'Playback speed', value: 2.4, ...positiveRange },
+    { key: 'initialX', label: 'Initial X', value: 1 },
+    { key: 'initialY', label: 'Initial Y', value: 1 },
+    runawayLimitParameter,
   ],
   duffing: [
-    { key: 'damping', label: 'Damping', value: 0.25, min: 0, step: 0.05 },
-    { key: 'forcing', label: 'Forcing', value: 0.3, min: 0, step: 0.05 },
-    { key: 'angularFrequency', label: 'Angular frequency', value: 1, min: 0, step: 0.1 },
-    { key: 'timeScale', label: 'Playback speed', value: 2.4, min: 0.01, step: 0.1 },
-    { key: 'initialX', label: 'Initial X', value: 0.2, step: 0.1 },
-    { key: 'initialY', label: 'Initial Y', value: -0.3, step: 0.1 },
+    { key: 'damping', label: 'Damping', value: 0.25 },
+    { key: 'forcing', label: 'Forcing', value: 0.3 },
+    { key: 'angularFrequency', label: 'Angular frequency', value: 1 },
+    { key: 'timeScale', label: 'Playback speed', value: 2.4, ...positiveRange },
+    { key: 'initialX', label: 'Initial X', value: 0.2 },
+    { key: 'initialY', label: 'Initial Y', value: -0.3 },
+    runawayLimitParameter,
   ],
   lorenz: [
-    { key: 'sigma', label: 'Sigma σ', value: 10, min: 0.01, step: 0.1 },
-    { key: 'rho', label: 'Rho ρ', value: 28, min: 0.01, step: 0.1 },
-    { key: 'beta', label: 'Beta β', value: 8 / 3, min: 0.01 },
-    { key: 'timeScale', label: 'Playback speed', value: 0.24, min: 0.01, step: 0.01 },
+    { key: 'sigma', label: 'Sigma σ', value: 10 },
+    { key: 'rho', label: 'Rho ρ', value: 28 },
+    { key: 'beta', label: 'Beta β', value: 8 / 3 },
+    { key: 'timeScale', label: 'Playback speed', value: 0.24, ...positiveRange },
     { key: 'initialX', label: 'Initial X', value: 18.89688574723792 },
     { key: 'initialY', label: 'Initial Y', value: 2.799477162418296 },
     { key: 'initialZ', label: 'Initial Z', value: 53.555488125917094 },
+    runawayLimitParameter,
   ],
 };
 
@@ -83,6 +97,29 @@ const required = <ElementType extends Element>(selector: string): ElementType =>
 const motionSelect = required<HTMLSelectElement>('#motion');
 const rendererNames: readonly RendererName[] = ['webgl', 'canvas', 'dom', 'svg'];
 let selectedRenderer: RendererName = 'webgl';
+const true3DMotions = new Set<MotionName>(['helix', 'lissajous', 'lorenz']);
+const supportsSpatialCoordinates = (name: MotionName): boolean => true3DMotions.has(name) || name === 'duffing';
+const motionOptions = Array.from(motionSelect.options).sort((a, b) => a.text.localeCompare(b.text));
+let hasExplicitMotion = false;
+
+const renderMotionOptions = (preferred?: MotionName): void => {
+  motionSelect.replaceChildren();
+  if (selectedRenderer === 'webgl') {
+    for (const [label, isTrue3D] of [['True 3D', true], ['Other motions', false]] as const) {
+      const group = document.createElement('optgroup');
+      group.label = label;
+      group.append(...motionOptions.filter((option) => true3DMotions.has(option.value as MotionName) === isTrue3D));
+      motionSelect.append(group);
+    }
+  } else {
+    motionSelect.append(...motionOptions);
+  }
+  motionSelect.value = preferred ?? motionSelect.options[0].value;
+};
+
+const defaultWebGLCoordinates = (): void => {
+  webglView.value = supportsSpatialCoordinates(motionSelect.value as MotionName) ? 'spatial' : 'planar';
+};
 const rendererTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('[role=tab][data-renderer]'));
 const rendererPanels = rendererNames.map((name) => required<HTMLElement>(`#panel-${name}`));
 const tablist = required<HTMLElement>('[role=tablist]');
@@ -108,6 +145,10 @@ const overflowNote = required<HTMLElement>('#overflow-note');
 const colorInput = required<HTMLInputElement>('#marker-color');
 const sizeInput = required<HTMLInputElement>('#marker-size');
 const sizeValue = required<HTMLOutputElement>('#marker-size-value');
+const depthStrengthInput = required<HTMLInputElement>('#depth-strength');
+const clampMarkerScaleInput = required<HTMLInputElement>('#clamp-marker-scale');
+const minMarkerScaleInput = required<HTMLInputElement>('#min-marker-scale');
+const maxMarkerScaleInput = required<HTMLInputElement>('#max-marker-scale');
 const trailInput = required<HTMLInputElement>('#show-trail');
 const trailLengthInput = required<HTMLInputElement>('#trail-length');
 const pathInput = required<HTMLInputElement>('#show-path');
@@ -151,6 +192,19 @@ const svgCircle = required<SVGCircleElement>('#svg-marker circle');
 const svgFullPath = required<SVGPathElement>('#svg-full-path');
 const svgTrailPath = required<SVGPathElement>('#svg-trail');
 
+const helixRotationOptions: readonly { value: HelixRotationDirection; label: string }[] = [
+  { value: 'counter-clockwise', label: 'Counter-clockwise' },
+  { value: 'clockwise', label: 'Clockwise' },
+];
+const helixFlowOptions: readonly { value: HelixFlowDirection; label: string }[] = [
+  { value: 'top-to-bottom', label: 'Top to bottom' },
+  { value: 'bottom-to-top', label: 'Bottom to top' },
+  { value: 'left-to-right', label: 'Left to right' },
+  { value: 'right-to-left', label: 'Right to left' },
+];
+let helixRotationDirection: HelixRotationDirection = helixRotationOptions[0].value;
+let helixFlowDirection: HelixFlowDirection = helixFlowOptions[0].value;
+
 const valuesByMotion = new Map<MotionName, Record<string, number>>();
 const valuesFor = (name: MotionName): Record<string, number> => {
   let values = valuesByMotion.get(name);
@@ -167,10 +221,10 @@ const createMotion = (name: MotionName): MotionSource<unknown> => {
     case 'ellipse': return createEllipseMotion({ periodSeconds: p.periodSeconds, radiusX: p.radiusX, radiusY: p.radiusY });
     case 'rose': return createRoseMotion({ periodSeconds: p.periodSeconds });
     case 'lissajous': return createLissajousMotion({ periodSeconds: p.periodSeconds, cyclesX: p.cyclesX, cyclesY: p.cyclesY, cyclesZ: p.cyclesZ });
-    case 'helix': return createHelixMotion({ periodSeconds: p.periodSeconds, turns: p.turns, fadeFraction: p.fadeFraction });
-    case 'vander-pol': return createVanderPolMotion({ mu: p.mu, timeScale: p.timeScale, initialX: p.initialX, initialY: p.initialY });
-    case 'duffing': return createDuffingMotion({ damping: p.damping, forcing: p.forcing, angularFrequency: p.angularFrequency, timeScale: p.timeScale, initialX: p.initialX, initialY: p.initialY });
-    case 'lorenz': return createLorenzMotion({ sigma: p.sigma, rho: p.rho, beta: p.beta, timeScale: p.timeScale, initialX: p.initialX, initialY: p.initialY, initialZ: p.initialZ });
+    case 'helix': return createHelixMotion({ periodSeconds: p.periodSeconds, turns: p.turns, fadeFraction: p.fadeFraction, rotationDirection: helixRotationDirection, flowDirection: helixFlowDirection });
+    case 'vander-pol': return createVanderPolMotion({ mu: p.mu, timeScale: p.timeScale, initialX: p.initialX, initialY: p.initialY, runawayLimit: p.runawayLimit });
+    case 'duffing': return createDuffingMotion({ damping: p.damping, forcing: p.forcing, angularFrequency: p.angularFrequency, timeScale: p.timeScale, initialX: p.initialX, initialY: p.initialY, runawayLimit: p.runawayLimit });
+    case 'lorenz': return createLorenzMotion({ sigma: p.sigma, rho: p.rho, beta: p.beta, timeScale: p.timeScale, initialX: p.initialX, initialY: p.initialY, initialZ: p.initialZ, runawayLimit: p.runawayLimit });
   }
 };
 
@@ -178,6 +232,7 @@ let controller: Controller | undefined;
 let webglController: WebGLController | undefined;
 let manuallyPaused = false;
 let activeMotionKind: MotionSource<unknown>['kind'] = 'analytic';
+let activeMotionName: MotionName = motionSelect.value as MotionName;
 let motionBounds: Bounds;
 let staticPath: SvgStaticPath | undefined;
 let clearTrail: (() => void) | undefined;
@@ -254,12 +309,20 @@ const setBoundsInputs = (bounds: Bounds): void => {
 
 const readFraming = (): Framing => {
   const fit = fitSelect.value as FrameFit;
+  const markerScale = readMarkerScale();
+  const nativePeak = motionSelect.value === 'ellipse' ? 1.5 : 1;
+  const effectivePeak = Math.max(markerScale.minMarkerScale ?? 0, Math.min(
+    markerScale.maxMarkerScale ?? Infinity,
+    1 + (markerScale.depthStrength ?? 1) * (nativePeak - 1),
+  ));
+  // Oversized markers can exceed the viewport; padding must remain finite.
+  const markerPadding = Math.min(Number.MAX_VALUE, Math.max(1.5, effectivePeak) * Number(sizeInput.value) + 3);
   const framing: Framing = {
     fit,
     zoom: Number(zoomInput.value),
     offsetX: Number(offsetXInput.value),
     offsetY: Number(offsetYInput.value),
-    padding: fit === 'contain' ? Number(sizeInput.value) * 1.5 + 3 : 0,
+    padding: fit === 'contain' ? markerPadding : 0,
   };
   if (!customBounds.checked) return framing;
   if (Object.values(boundsInputs).some((input) => input.value.trim() === '')) {
@@ -278,7 +341,9 @@ const readFraming = (): Framing => {
 const updateAvailability = (motion: Pick<MotionSource<unknown>, 'kind'>): void => {
   const dom = selectedRenderer === 'dom';
   const webgl = selectedRenderer === 'webgl';
-  const spatialMotion = ['helix', 'lorenz', 'lissajous', 'duffing'].includes(motionSelect.value);
+  depthStrengthInput.disabled = ['rose', 'vander-pol'].includes(motionSelect.value);
+  minMarkerScaleInput.disabled = maxMarkerScaleInput.disabled = !clampMarkerScaleInput.checked;
+  const spatialMotion = supportsSpatialCoordinates(motionSelect.value as MotionName);
   if (!spatialMotion) webglView.value = 'planar';
   webglView.querySelector<HTMLOptionElement>('option[value="spatial"]')!.disabled = !spatialMotion;
   webglView.disabled = !webgl;
@@ -327,8 +392,20 @@ const spatialView = (): boolean => selectedRenderer === 'webgl' && webglView.val
 const presetCameraForView = (): OrthographicCamera | undefined => {
   if (!spatialView()) return undefined;
   const helix = motionSelect.value === 'helix';
-  const centerZ = helix ? valuesFor('helix').turns / 4 : 0;
-  const extent = helix ? Math.max(1.7, centerZ + 0.6) : 1.7;
+  const axisCenter = helix ? valuesFor('helix').turns / 4 : 0;
+  const extent = helix ? Math.max(1.7, axisCenter + 0.6) : 1.7;
+  if (helix) {
+    const horizontal = helixFlowDirection === 'left-to-right' || helixFlowDirection === 'right-to-left';
+    return {
+      position: horizontal
+        ? cameraPreset === 'front' ? { x: axisCenter, y: -7, z: 0 } : { x: axisCenter + 5, y: -5, z: 4 }
+        : cameraPreset === 'front' ? { x: 0, y: 7, z: axisCenter } : { x: 5, y: 5, z: axisCenter - 4 },
+      target: horizontal ? { x: axisCenter, y: 0, z: 0 } : { x: 0, y: 0, z: axisCenter },
+      up: horizontal ? { x: 0, y: 0, z: 1 } : { x: 0, y: 0, z: -1 },
+      near: 0.1, far: 14,
+      bounds: { minX: -extent, maxX: extent, minY: -extent, maxY: extent },
+    };
+  }
   // Duffing's angular state is displayed continuously around a cylinder;
   // Lissajous uses conventional XYZ axes. Both views use positive Y as up.
   if (motionSelect.value === 'duffing' || motionSelect.value === 'lissajous') {
@@ -342,9 +419,9 @@ const presetCameraForView = (): OrthographicCamera | undefined => {
   }
   return {
     position: cameraPreset === 'front'
-      ? { x: 0, y: -7, z: centerZ }
-      : { x: 5, y: -5, z: centerZ + 4 },
-    target: { x: 0, y: 0, z: centerZ }, up: { x: 0, y: 0, z: 1 },
+      ? { x: 0, y: -7, z: 0 }
+      : { x: 5, y: -5, z: 4 },
+    target: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 0, z: 1 },
     near: 0.1, far: 14,
     bounds: { minX: -extent, maxX: extent, minY: -extent, maxY: extent },
   };
@@ -417,6 +494,25 @@ const readAccumulationLimit = (): number => {
   return count;
 };
 
+const readMarkerScale = (): MarkerScaleOptions => {
+  const read = (input: HTMLInputElement, label: string): number => {
+    const value = input.valueAsNumber;
+    // Disabled strength is still persisted and validated for the next motion.
+    if (input.value.trim() === '' || !input.checkValidity() || !Number.isFinite(value) || value < 0) {
+      throw new RangeError(`${label} must be finite and nonnegative. The current animation is unchanged.`);
+    }
+    return value;
+  };
+  const depthStrength = read(depthStrengthInput, 'Depth strength');
+  if (!clampMarkerScaleInput.checked) return { depthStrength };
+  const minMarkerScale = read(minMarkerScaleInput, 'Minimum marker scale');
+  const maxMarkerScale = read(maxMarkerScaleInput, 'Maximum marker scale');
+  if (minMarkerScale > maxMarkerScale) {
+    throw new RangeError('Minimum marker scale must not exceed maximum marker scale. The current animation is unchanged.');
+  }
+  return { depthStrength, minMarkerScale, maxMarkerScale };
+};
+
 const updateStatus = (): void => {
   const bitmap = selectedRenderer === 'canvas' || selectedRenderer === 'webgl';
   const overflow = bitmap ? 'bitmap clipping' : `${overflowSelect.value} overflow`;
@@ -439,6 +535,7 @@ const mount = (): boolean => {
     updateAvailability(motion);
     setBoundsInputs(cameraForView()?.bounds ?? motion.bounds);
     const framing = readFraming();
+    const markerScale = readMarkerScale();
     const maxSamples = trailInput.checked && !trailInput.disabled ? readTrailLimit() : 128;
     const accumulationMaxSamples = selectedRenderer === 'webgl' && (webglAccumulate.checked || webglPaint.checked) ? readAccumulationLimit() : 12000;
     disposeCurrent();
@@ -456,7 +553,7 @@ const mount = (): boolean => {
         ? createCanvasPath(motion, { color: `${color}66`, width: 1 }) : undefined;
       clearTrail = trail?.clear;
       controller = animateCanvas(canvas, motion, {
-        framing, autoplay: !manuallyPaused,
+        framing, markerScale, autoplay: !manuallyPaused,
         marker: { color, radius },
         ...(trail || path ? { render(context, frame) {
           path?.(context, frame);
@@ -466,7 +563,7 @@ const mount = (): boolean => {
       });
     } else if (renderer === 'webgl') {
       webglController = animateWebGL(webglCanvas, motion, {
-        framing, autoplay: !manuallyPaused, lighting: spatialView() && webglLighting.checked,
+        framing, markerScale, autoplay: !manuallyPaused, lighting: spatialView() && webglLighting.checked,
         camera: cameraForView(), accumulate: webglAccumulate.checked ? { maxSamples: accumulationMaxSamples } : false,
         trail: trailInput.checked ? { maxSamples, width: 2 } : false,
         paint: webglPaint.checked ? { maxSamples: accumulationMaxSamples, limitBehavior: paintLimitBehavior.value as 'pause' | 'trim-oldest' } : false,
@@ -502,7 +599,7 @@ const mount = (): boolean => {
       });
       controller = webglController;
     } else if (renderer === 'dom') {
-      controller = animateDom({ viewport: domViewport, marker: domMarker }, motion, { framing, autoplay: !manuallyPaused });
+      controller = animateDom({ viewport: domViewport, marker: domMarker }, motion, { framing, markerScale, autoplay: !manuallyPaused });
     } else {
       staticPath = pathInput.checked && !pathInput.disabled && motion.kind === 'analytic'
         ? createSvgStaticPath({ viewport: svgViewport, path: svgFullPath, motion, framing }) : undefined;
@@ -511,13 +608,14 @@ const mount = (): boolean => {
       clearTrail = trail?.clear;
       disposeTrail = trail?.dispose;
       controller = animateSvg({ viewport: svgViewport, marker: svgMarker }, motion, {
-        framing, autoplay: !manuallyPaused,
+        framing, markerScale, autoplay: !manuallyPaused,
         ...(trail ? { render(frame, targets) {
           trail.render(frame);
           renderSvgMarker(frame, targets);
         } } : {}),
       });
     }
+    activeMotionName = motionName;
     mountedPaintLimitBehavior = paintLimitBehavior.value;
     pauseButton.textContent = manuallyPaused ? 'Resume' : 'Pause';
     updateStatus();
@@ -540,6 +638,46 @@ const updateFraming = (): void => {
   }
 };
 
+const mountParameterChange = (apply: () => void, revert: () => void): boolean => {
+  const previousCamera = draggedCamera;
+  const previousCameraChoice = webglCamera.value;
+  const previousBounds = motionBounds;
+  const previousBoundsValues = Object.values(boundsInputs).map((input) => input.value);
+  apply();
+  if (mount()) return true;
+  // Failed validation retains the old source; controls must describe that source.
+  revert();
+  draggedCamera = previousCamera;
+  webglCamera.value = previousCameraChoice;
+  motionBounds = previousBounds;
+  updateAvailability({ kind: activeMotionKind });
+  Object.values(boundsInputs).forEach((input, index) => { input.value = previousBoundsValues[index]; });
+  return false;
+};
+
+const appendChoiceParameter = <Value extends string>(
+  key: string, text: string, options: readonly { value: Value; label: string }[],
+  value: Value, update: (value: Value) => void,
+): void => {
+  const label = document.createElement('label');
+  label.textContent = text;
+  const select = document.createElement('select');
+  select.id = `helix-${key}`;
+  select.dataset.parameter = key;
+  for (const option of options) select.add(new Option(option.label, option.value));
+  select.value = value;
+  select.addEventListener('change', () => {
+    const option = options.find((candidate) => candidate.value === select.value);
+    if (!option) return;
+    if (mountParameterChange(() => update(option.value), () => {
+      update(value);
+      select.value = value;
+    })) value = option.value;
+  });
+  label.append(select);
+  parameterControls.append(label);
+};
+
 const renderParameterControls = (): void => {
   parameterControls.replaceChildren();
   const name = motionSelect.value as MotionName;
@@ -550,25 +688,67 @@ const renderParameterControls = (): void => {
     const input = document.createElement('input');
     input.type = 'number';
     input.required = true;
+    if (definition.description) input.title = definition.description;
     input.step = String(definition.step ?? 'any');
     if (definition.min !== undefined) input.min = String(definition.min);
     if (definition.max !== undefined) input.max = String(definition.max);
     input.value = String(values[definition.key]);
     input.dataset.parameter = definition.key;
     input.addEventListener('change', () => {
-      if (!input.checkValidity()) {
+      const candidate = input.valueAsNumber;
+      const belowMinimum = definition.min !== undefined && (definition.minExclusive ? candidate <= definition.min : candidate < definition.min);
+      const aboveMaximum = definition.max !== undefined && (definition.maxExclusive ? candidate >= definition.max : candidate > definition.max);
+      if (!input.checkValidity() || !Number.isFinite(candidate) || belowMinimum || aboveMaximum) {
+        input.value = String(values[definition.key]);
         status.textContent = `${definition.label} is outside its allowed range.`;
         return;
       }
-      values[definition.key] = Number(input.value);
-      mount();
+      const previousValue = values[definition.key];
+      mountParameterChange(() => { values[definition.key] = candidate; }, () => {
+        values[definition.key] = previousValue;
+        input.value = String(previousValue);
+      });
     });
     label.append(input);
     parameterControls.append(label);
   }
+  if (name === 'helix') {
+    appendChoiceParameter('rotationDirection', 'Rotation direction', helixRotationOptions, helixRotationDirection, (value) => {
+      helixRotationDirection = value;
+    });
+    appendChoiceParameter('flowDirection', 'Flow direction', helixFlowOptions, helixFlowDirection, (value) => {
+      helixFlowDirection = value;
+      // Axis orientation changes the camera up vector; restore the chosen preset.
+      draggedCamera = undefined;
+      webglCamera.value = cameraPreset;
+    });
+  }
 };
 
+for (const control of [depthStrengthInput, clampMarkerScaleInput, minMarkerScaleInput, maxMarkerScaleInput]) {
+  control.addEventListener('change', () => {
+    minMarkerScaleInput.disabled = maxMarkerScaleInput.disabled = !clampMarkerScaleInput.checked;
+    try {
+      const markerScale = readMarkerScale();
+      readFraming(); // Validate framing before applying either presentation change.
+      controller?.setMarkerScale(markerScale);
+      updateFraming();
+    } catch (error) {
+      status.textContent = error instanceof Error ? error.message : String(error);
+    }
+  });
+}
+
 motionSelect.addEventListener('change', () => {
+  try {
+    readMarkerScale();
+  } catch (error) {
+    motionSelect.value = activeMotionName;
+    status.textContent = error instanceof Error ? error.message : String(error);
+    return;
+  }
+  hasExplicitMotion = true;
+  if (selectedRenderer === 'webgl') defaultWebGLCoordinates();
   draggedCamera = undefined;
   webglCamera.value = cameraPreset;
   customBounds.checked = false;
@@ -582,12 +762,27 @@ const selectRenderer = (renderer: RendererName): void => {
   const previousAccumulation = webglAccumulate.checked;
   const previousPaint = webglPaint.checked;
   const previousView = webglView.value;
+  const previousMotion = motionSelect.value as MotionName;
+  const previousDraggedCamera = draggedCamera;
+  const previousCameraOption = webglCamera.value;
   selectedRenderer = renderer;
+  renderMotionOptions(hasExplicitMotion ? previousMotion : undefined);
+  const motionChanged = motionSelect.value !== previousMotion;
+  if (motionChanged) {
+    draggedCamera = undefined;
+    webglCamera.value = cameraPreset;
+    renderParameterControls();
+  }
+  if (renderer === 'webgl') defaultWebGLCoordinates();
   if (renderer === 'webgl' && trailInput.checked) { webglAccumulate.checked = false; webglPaint.checked = false; }
   if (!mount() && required<HTMLElement>(`#panel-${renderer}`).hidden) {
     // Validation failed before the panel switch. Keep selection and controls
     // coherent even if the current renderer could not create a controller.
     selectedRenderer = previous;
+    renderMotionOptions(previousMotion);
+    if (motionChanged) renderParameterControls();
+    draggedCamera = previousDraggedCamera;
+    webglCamera.value = previousCameraOption;
     webglAccumulate.checked = previousAccumulation;
     webglPaint.checked = previousPaint;
     webglView.value = previousView;
@@ -730,20 +925,27 @@ pauseButton.addEventListener('click', () => {
 resetButton.addEventListener('click', () => { clearTrail?.(); controller?.reset(); updateStatus(); });
 defaultsButton.addEventListener('click', () => {
   valuesByMotion.clear();
+  helixRotationDirection = helixRotationOptions[0].value;
+  helixFlowDirection = helixFlowOptions[0].value;
   manuallyPaused = false;
-  motionSelect.value = 'ellipse';
   selectedRenderer = 'webgl';
-  fitSelect.value = 'cover';
+  hasExplicitMotion = false;
+  renderMotionOptions();
+  fitSelect.value = fitSelect.options[0].value;
   zoomInput.value = '1';
   offsetXInput.value = '0';
   offsetYInput.value = '0';
   overflowSelect.value = 'clip';
   colorInput.value = '#67e8f9';
   sizeInput.value = '9';
+  depthStrengthInput.value = '1';
+  clampMarkerScaleInput.checked = false;
+  minMarkerScaleInput.value = '0.25';
+  maxMarkerScaleInput.value = '1';
   trailInput.checked = false;
   trailLengthInput.value = '128';
   pathInput.checked = false;
-  webglView.value = 'planar';
+  defaultWebGLCoordinates();
   webglCamera.value = 'oblique';
   cameraPreset = 'oblique';
   draggedCamera = undefined;
@@ -765,5 +967,7 @@ window.addEventListener('blur', endCameraDrag);
 
 for (const input of Object.values(boundsInputs)) input.disabled = true;
 updateOutputs();
+renderMotionOptions();
+defaultWebGLCoordinates();
 renderParameterControls();
 mount();

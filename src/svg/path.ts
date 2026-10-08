@@ -36,7 +36,13 @@ const projectedPosition = <State>(
   width: number,
   height: number,
   framing: Framing | undefined,
-) => projectToCssPixels(motion.sample(elapsedSeconds).pose, { width, height }, framing, motion.bounds);
+) => {
+  const sample = motion.sample(elapsedSeconds);
+  return {
+    position: projectToCssPixels(sample.pose, { width, height }, framing, motion.bounds),
+    pathSegment: sample.pathSegment,
+  };
+};
 
 /**
  * Draws one period of an analytic motion into a consumer-owned SVG path.
@@ -66,16 +72,26 @@ export const createSvgStaticPath = <State>(options: SvgStaticPathOptions<State>)
     let previous = projectedPosition(motion, 0, viewportSize.width, viewportSize.height, framing);
     for (let index = 1; index <= estimateSegments; index += 1) {
       const current = projectedPosition(motion, motion.periodSeconds * index / estimateSegments, viewportSize.width, viewportSize.height, framing);
-      length += Math.hypot(current.x - previous.x, current.y - previous.y);
+      if (current.pathSegment === previous.pathSegment) {
+        length += Math.hypot(current.position.x - previous.position.x, current.position.y - previous.position.y);
+      }
       previous = current;
     }
     const segments = Math.max(1, Math.min(maxSegments, Math.ceil(length / segmentLength)));
-    const points = [];
+    const subpaths = [];
+    let points = [];
+    let previousSegment: number | undefined;
     for (let index = 0; index <= segments; index += 1) {
-      const position = projectedPosition(motion, motion.periodSeconds * index / segments, viewportSize.width, viewportSize.height, framing);
-      points.push(cssPointToSvgPoint(viewport, position, path));
+      const sample = projectedPosition(motion, motion.periodSeconds * index / segments, viewportSize.width, viewportSize.height, framing);
+      if (points.length > 0 && sample.pathSegment !== previousSegment) {
+        subpaths.push(svgPathData(points));
+        points = [];
+      }
+      points.push(cssPointToSvgPoint(viewport, sample.position, path));
+      previousSegment = sample.pathSegment;
     }
-    path.setAttribute('d', svgPathData(points));
+    subpaths.push(svgPathData(points));
+    path.setAttribute('d', subpaths.join(' '));
   };
 
   render();

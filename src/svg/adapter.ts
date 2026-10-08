@@ -1,4 +1,4 @@
-import type { Framing, MotionSource, Viewport } from '../core';
+import type { Framing, MarkerScaleOptions, MotionSource, Viewport } from '../core';
 import {
   createController,
   type Controller,
@@ -21,6 +21,7 @@ export type SvgRender<State> = (frame: Frame<State>, targets: SvgTargets) => voi
 
 export interface AnimateSvgOptions<State> {
   readonly framing?: Framing;
+  readonly markerScale?: MarkerScaleOptions;
   readonly autoplay?: boolean;
   /** Defaults to false so SVG animations continue when scrolled outside the viewport. */
   readonly offscreen?: boolean;
@@ -109,6 +110,7 @@ export const animateSvg = <State>(
       ? (frame) => options.render?.(frame, elements)
       : defaultRender,
     framing: options.framing,
+    markerScale: options.markerScale,
     autoplay: options.autoplay,
     offscreen: options.offscreen ?? false,
     platform: options.platform,

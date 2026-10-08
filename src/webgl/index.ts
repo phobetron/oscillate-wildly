@@ -1,5 +1,5 @@
 import { projectOrthographic, validateOrthographicCamera } from '../core';
-import type { Framing, MotionSource, OrthographicCamera, Point3D, Pose, ProjectedPose, Viewport } from '../core';
+import type { Framing, MarkerScaleOptions, MotionSource, OrthographicCamera, Point3D, Pose, ProjectedPose, Viewport } from '../core';
 import { createController } from '../runtime';
 import type { Controller, Frame, RuntimePlatform } from '../runtime';
 import { createTrailHistory } from '../runtime/trail';
@@ -41,6 +41,7 @@ export interface WebGLPaintOptions {
 
 export interface AnimateWebGLOptions<State> {
   readonly framing?: Framing;
+  readonly markerScale?: MarkerScaleOptions;
   readonly autoplay?: boolean;
   /** Defaults to true, as with the Canvas adapter. */
   readonly offscreen?: boolean;
@@ -132,6 +133,7 @@ export const animateWebGL = <State>(
     ? paintLimitBehavior === 'trim-oldest' ? createTrimmingPaintBrush(paint.maxSamples) : createRibbonBrush(paint.maxSamples)
     : undefined;
   let previousBrushPose: Pose | undefined;
+  let previousBrushPathSegment: number | undefined;
   let brushBasis: { x: number[]; y: number[]; xx: number; yy: number; xy: number; determinant: number } | undefined;
   let currentBrush = false;
   const markers = accumulation ? createTrailHistory<WebGLMarker>(accumulationLimit) : undefined;
@@ -150,6 +152,7 @@ export const animateWebGL = <State>(
   }
   const clearHistory = (): void => {
     history?.clear(); markers?.clear(); ribbon?.clear(); previousBrushPose = undefined; brushBasis = undefined; previousMarkerTime = undefined; previousMarker = undefined; markerRendererNeedsRestore = true;
+    previousBrushPathSegment = undefined;
   };
   let camera = snapshotCamera(options.camera);
   let framing = options.framing ?? {};
@@ -187,6 +190,7 @@ export const animateWebGL = <State>(
       source: motion,
       measureViewport,
       framing,
+      markerScale: options.markerScale,
       autoplay: options.autoplay,
       offscreen: options.offscreen ?? true,
       platform: options.platform,
@@ -287,14 +291,21 @@ export const animateWebGL = <State>(
           if (![pose.x, pose.y, pose.z ?? 0, planarDepth].every(Number.isFinite)) {
             throw new RangeError('WebGL trail coordinates and visibility depth must be finite');
           }
-          history.add({ pose: { ...pose }, visibilityDepth: planarDepth }, frame.elapsedSeconds);
-          const positions = history.values().map((retained) => {
-            const projected = project(retained.pose);
-            return camera ? projected : { ...projected, visibilityDepth: retained.visibilityDepth };
-          });
-          renderer.drawTrail(positions, frame.viewport, { width: trail.width, color: trail.color ?? marker?.color });
+          history.add({ pose: { ...pose }, visibilityDepth: planarDepth }, frame.elapsedSeconds, frame.pathSegment);
+          for (const samples of history.segments()) {
+            const positions = samples.map((retained) => {
+              const projected = project(retained.pose);
+              return camera ? projected : { ...projected, visibilityDepth: retained.visibilityDepth };
+            });
+            renderer.drawTrail(positions, frame.viewport, { width: trail.width, color: trail.color ?? marker?.color });
+          }
         }
         if (ribbon && currentBrush && marker !== null) {
+          if (previousBrushPose && previousBrushPathSegment !== frame.pathSegment) {
+            ribbon.breakStroke();
+            previousBrushPose = undefined;
+            brushBasis = undefined;
+          }
           const radius = (marker.radius ?? 5) * (pose.depth ?? 1);
           if (!Number.isFinite(radius) || radius < 0 || (marker.radius ?? 5) < 0 || (pose.depth ?? 1) < 0) {
             throw new RangeError('WebGL brush radius and depth must be finite and non-negative');
@@ -334,6 +345,7 @@ export const animateWebGL = <State>(
               axisY: { x: axisY[0], y: axisY[1], z: axisY[2] },
             });
             previousBrushPose = { ...pose };
+            previousBrushPathSegment = frame.pathSegment;
             if (ribbon.full && paintLimitBehavior === 'pause') {
               controller?.pause();
               if (!wasFull) options.onPaintLimit?.();
@@ -343,11 +355,13 @@ export const animateWebGL = <State>(
             // scale. Lift the brush instead of inverting a singular mapping.
             ribbon.breakStroke();
             previousBrushPose = undefined;
+            previousBrushPathSegment = undefined;
             brushBasis = undefined;
           }
         } else {
           ribbon?.breakStroke();
           previousBrushPose = undefined;
+          previousBrushPathSegment = undefined;
           brushBasis = undefined;
         }
         if (ribbon && ribbon.footprints.count > 0) {

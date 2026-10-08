@@ -29,21 +29,25 @@ export const createCanvasPath = <State>(
     throw new RangeError('maxSegments must be a positive integer');
   }
   let previousKey: string | undefined;
-  let points: Pose[] = [];
+  let points: { position: Pose; pathSegment: number | undefined }[] = [];
 
   return (context, frame) => {
     const nextKey = cacheKey(frame, source);
     if (nextKey !== previousKey) {
-      const project = (elapsedSeconds: number) => frame.project(source.sample(elapsedSeconds).pose);
+      const project = (elapsedSeconds: number) => {
+        const sample = source.sample(elapsedSeconds);
+        return { position: frame.project(sample.pose), pathSegment: sample.pathSegment };
+      };
       let segments = Math.min(32, maxSegments);
       let sampled = Array.from({ length: segments + 1 }, (_, index) =>
         project((index / segments) * source.periodSeconds));
       while (segments < maxSegments) {
         let longest = 0;
         for (let index = 1; index < sampled.length; index += 1) {
+          if (sampled[index].pathSegment !== sampled[index - 1].pathSegment) continue;
           longest = Math.max(longest, Math.hypot(
-            sampled[index].x - sampled[index - 1].x,
-            sampled[index].y - sampled[index - 1].y,
+            sampled[index].position.x - sampled[index - 1].position.x,
+            sampled[index].position.y - sampled[index - 1].position.y,
           ));
         }
         if (longest <= 2) break;
@@ -61,9 +65,11 @@ export const createCanvasPath = <State>(
       context.strokeStyle = options.color ?? 'rgba(255, 0, 0, 0.3)';
       context.lineWidth = options.width ?? 1;
       context.beginPath();
-      context.moveTo(points[0].x, points[0].y);
+      context.moveTo(points[0].position.x, points[0].position.y);
       for (let index = 1; index < points.length; index += 1) {
-        context.lineTo(points[index].x, points[index].y);
+        const { position, pathSegment } = points[index];
+        if (pathSegment !== points[index - 1].pathSegment) context.moveTo(position.x, position.y);
+        else context.lineTo(position.x, position.y);
       }
       context.stroke();
     } finally {

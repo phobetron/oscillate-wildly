@@ -1,4 +1,4 @@
-import type { Framing, MotionSource } from '../core';
+import type { Framing, MarkerScaleOptions, MotionSource } from '../core';
 import { createController } from '../runtime';
 import type { Controller, Frame } from '../runtime';
 
@@ -25,6 +25,7 @@ export type DomRender<State> = (frame: Frame<State>, targets: DomTargets) => voi
 
 export interface AnimateDomOptions<State> {
   readonly framing?: Framing;
+  readonly markerScale?: MarkerScaleOptions;
   readonly autoplay?: boolean;
   /** Replaces the default transform, depth, and opacity rendering completely. */
   readonly render?: DomRender<State>;
@@ -91,6 +92,7 @@ export const animateDom = <State>(
         : String(frame.pose.opacity);
     },
     framing: options.framing,
+    markerScale: options.markerScale,
     autoplay: options.autoplay,
     offscreen: false,
     onDispose: () => {

@@ -1,3 +1,5 @@
+import { createHelixMotion } from '../../src/motions/helix';
+import { createEllipseMotion } from '../../src/motions/ellipse';
 import { describe, expect, test } from '@rstest/core';
 import type { AnalyticMotionSource, MotionSample, Pose } from '../../src/core';
 import { animateSvg, renderSvgMarker } from '../../src/svg';
@@ -141,6 +143,44 @@ describe('animateSvg', () => {
 });
 
 describe('SVG helpers', () => {
+  test('retains separate helix subpaths across wraps, paused reprojection, and eviction', () => {
+    const motion = createHelixMotion({ periodSeconds: 1, turns: 1 });
+    const { viewport, path } = elements();
+    const trail = createSvgTrail({ viewport, path, maxSamples: 4 });
+    const render = (time: number, multiplier = 1) => {
+      const sample = motion.sample(time);
+      trail.render({ ...worldFrame(sample.pose, time, multiplier), ...sample });
+      return path.getAttribute('d')!;
+    };
+    const commands = (data: string) => data.match(/[ML]/g);
+    render(0.75);
+    render(0.875);
+    expect(commands(render(1))).toEqual(['M', 'L', 'M']);
+    const advanced = render(1.125);
+    expect(commands(advanced)).toEqual(['M', 'L', 'M', 'L']);
+    const reprojected = render(1.125, 10);
+    expect(reprojected).toBe(advanced.replace(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/g, (coordinate) => String(Number(coordinate) * 10)));
+    expect(render(1.125, 10)).toBe(reprojected);
+    expect(commands(render(2))).toEqual(['M', 'M', 'L', 'M']);
+    expect(commands(render(2.125))).toEqual(['M', 'L', 'M', 'L']);
+    expect(render(0)).toBe('M 0.5 0');
+    trail.clear();
+    expect(path.getAttribute('d')).toBe('');
+    expect(commands(render(0.125))).toEqual(['M']);
+    trail.dispose();
+    expect(path.getAttribute('d')).toBe('M 0 0');
+  });
+
+  test('breaks helix static paths at the endpoint while leaving closed curves continuous', () => {
+    const { viewport, path } = elements();
+    const helix = createSvgStaticPath({ viewport, path, motion: createHelixMotion({ periodSeconds: 1, turns: 1 }), maxSegments: 4 });
+    expect(path.getAttribute('d')!.match(/[ML]/g)).toEqual(['M', 'L', 'L', 'L', 'M']);
+    helix.dispose();
+    const ellipse = createSvgStaticPath({ viewport, path, motion: createEllipseMotion(), maxSegments: 4 });
+    expect(path.getAttribute('d')!.match(/[ML]/g)).toEqual(['M', 'L', 'L', 'L', 'L']);
+    ellipse.dispose();
+  });
+
   test('reprojects paused history without eviction and snapshots mutable poses', () => {
     const { viewport, path } = elements();
     const trail = createSvgTrail<undefined>({ viewport, path, maxSamples: 2 });

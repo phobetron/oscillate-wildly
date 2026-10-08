@@ -1,6 +1,7 @@
 import { projectToCssPixels } from '../core/framing';
-import type { Framing, MotionSample, MotionSource, Pose, ProjectedPose, Viewport } from '../core/types';
+import type { Framing, MarkerScaleOptions, MotionSample, MotionSource, Pose, ProjectedPose, Viewport } from '../core/types';
 import { createBrowserPlatform, type RuntimePlatform } from './platform';
+import { createMarkerScaleMapper } from './markerScale';
 
 const STEP_SECONDS = 1 / 120;
 const MAX_DELTA_SECONDS = 0.05;
@@ -14,6 +15,8 @@ export interface Frame<State> {
   readonly position: ProjectedPose;
   readonly viewport: Viewport;
   readonly elapsedSeconds: number;
+  /** Stable path identity from the motion; changes mark discontinuous movement. */
+  readonly pathSegment?: number;
   /** Reprojects a world-space pose using this frame's viewport and framing. */
   project(pose: Pose): ProjectedPose;
 }
@@ -29,6 +32,7 @@ export interface CreateControllerOptions<State> {
   readonly measureViewport: () => Viewport;
   readonly render: (frame: Frame<State>) => void;
   readonly framing?: Framing;
+  readonly markerScale?: MarkerScaleOptions;
   readonly autoplay?: boolean;
   /** Pause while the target is outside the viewport. Adapters choose their own default. */
   readonly offscreen?: boolean;
@@ -49,6 +53,8 @@ export interface Controller {
   reset(): void;
   /** Reproject the current motion without resetting its elapsed time or state. */
   setFraming(framing: Framing): void;
+  /** Redraw with new marker-size presentation without resetting motion or pause state. */
+  setMarkerScale(options: MarkerScaleOptions): void;
   dispose(): void;
   isPaused(): boolean;
 }
@@ -150,6 +156,7 @@ export const createController = <State>(options: CreateControllerOptions<State>)
   const scheduler = schedulerFor(platform);
   const source = options.source;
   let framing = options.framing ?? {};
+  let scaleMarker = createMarkerScaleMapper(options.markerScale);
   const offscreen = options.offscreen ?? false;
   const resizeTarget = options.resizeTarget ?? options.target;
   const intersectionTarget = options.intersectionTarget ?? options.target;
@@ -174,16 +181,22 @@ export const createController = <State>(options: CreateControllerOptions<State>)
   const running = (): boolean => !disposed && available && hasViewport && !manuallyPaused && documentVisible && (!offscreen || intersecting) && !reducedMotion;
 
   const frameFor = (sample: MotionSample<State>, pose: Pose, viewport: Viewport): Frame<State> => {
+    const presented = scaleMarker(pose);
     const project = (worldPose: Pose): ProjectedPose => projectToCssPixels(worldPose, viewport, framing, source.bounds);
-    return { state: sample.state, pose, position: project(pose), viewport, elapsedSeconds, project };
+    return { state: sample.state, pose: presented, position: project(presented), viewport, elapsedSeconds, project,
+      ...(sample.pathSegment === undefined ? {} : { pathSegment: sample.pathSegment }),
+    };
   };
+
+  const currentPose = (): Pose => source.kind === 'stateful' && previous.pathSegment === current.pathSegment
+    ? interpolate(previous.pose, current.pose, accumulator / STEP_SECONDS)
+    : current.pose;
 
   const render = (): boolean => {
     const viewport = options.measureViewport();
     hasViewport = validViewport(viewport);
     if (!hasViewport) return false;
-    const pose = source.kind === 'stateful' ? interpolate(previous.pose, current.pose, accumulator / STEP_SECONDS) : current.pose;
-    options.render(frameFor(current, pose, viewport));
+    options.render(frameFor(current, currentPose(), viewport));
     return true;
   };
 
@@ -252,9 +265,7 @@ export const createController = <State>(options: CreateControllerOptions<State>)
         if (steps === MAX_STEPS_PER_FRAME) accumulator = Math.min(accumulator, STEP_SECONDS);
         elapsedSeconds += capped;
       }
-      const pose = source.kind === 'stateful' ? interpolate(previous.pose, current.pose, accumulator / STEP_SECONDS) : current.pose;
-      const project = (worldPose: Pose): ProjectedPose => projectToCssPixels(worldPose, viewport, framing, source.bounds);
-      options.render({ state: current.state, pose, position: project(pose), viewport, elapsedSeconds, project });
+      options.render(frameFor(current, currentPose(), viewport));
     },
   };
 
@@ -340,6 +351,18 @@ export const createController = <State>(options: CreateControllerOptions<State>)
         render();
       } catch (error) {
         framing = previousFraming;
+        throw error;
+      }
+    },
+    setMarkerScale(nextOptions) {
+      if (disposed) return;
+      const next = createMarkerScaleMapper(nextOptions);
+      const previousScaleMarker = scaleMarker;
+      scaleMarker = next;
+      try {
+        render();
+      } catch (error) {
+        scaleMarker = previousScaleMarker;
         throw error;
       }
     },

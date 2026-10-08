@@ -22,20 +22,22 @@ export const createCanvasTrail = <State>(
   const history = createTrailHistory<Pose>(options.maxSamples);
 
   const render: CanvasTrailRenderer<State> = (context, frame) => {
-    history.add({ ...frame.pose }, frame.elapsedSeconds);
-    const samples = history.values();
-    if (samples.length < 2) return;
+    history.add({ ...frame.pose }, frame.elapsedSeconds, frame.pathSegment);
+    if (history.size < 2) return;
+    const segments = history.segments();
 
     context.save();
     try {
       context.strokeStyle = options.color ?? 'rgba(255, 0, 0, 0.45)';
       context.lineWidth = options.width ?? 1;
       context.beginPath();
-      const first = frame.project(samples[0]);
-      context.moveTo(first.x, first.y);
-      for (let index = 1; index < samples.length; index += 1) {
-        const position = frame.project(samples[index]);
-        context.lineTo(position.x, position.y);
+      for (const samples of segments) {
+        const first = frame.project(samples[0]);
+        context.moveTo(first.x, first.y);
+        for (let index = 1; index < samples.length; index += 1) {
+          const position = frame.project(samples[index]);
+          context.lineTo(position.x, position.y);
+        }
       }
       context.stroke();
     } finally {

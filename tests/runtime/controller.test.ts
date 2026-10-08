@@ -73,6 +73,140 @@ const analytic = (): AnalyticMotionSource<number> => ({
 const viewport = (): Viewport => ({ width: 200, height: 100 });
 
 describe('createController', () => {
+  it('does not interpolate across a path jump and resumes interpolation within the new path', () => {
+    const platform = new FakePlatform();
+    let step = 0;
+    const source: StatefulMotionSource<number> = {
+      kind: 'stateful', bounds,
+      step: () => { step += 1; }, reset: () => { step = 0; },
+      snapshot: () => ({ state: step, pathSegment: step === 0 ? 0 : 1,
+        pose: { x: step === 0 ? 0 : 100 + 2 * (step - 1), y: 0 } }),
+    };
+    let frame!: Frame<number>;
+    const controller = createController({
+      target: {}, source, platform, measureViewport: viewport,
+      render: (next) => { frame = next; },
+    });
+    expect(frame.pathSegment).toBe(0);
+    platform.fire(0);
+    platform.fire(10);
+    expect(frame.pathSegment).toBe(1);
+    expect(frame.pose.x).toBe(100);
+    controller.pause();
+    controller.setFraming({ zoom: 2 });
+    expect(frame.pathSegment).toBe(1);
+    expect(frame.pose.x).toBe(100);
+    controller.resume();
+    platform.fire(10);
+    platform.fire(20);
+    expect(frame.pose.x).toBeCloseTo(100.8, 12);
+    controller.reset();
+    expect(frame.pathSegment).toBe(0);
+    expect(frame.pose.x).toBe(0);
+    controller.dispose();
+  });
+
+  it('updates marker presentation without changing simulation time, state, or pause', () => {
+    const platform = new FakePlatform();
+    const source = {
+      ...analytic(),
+      sample: (elapsed: number) => ({ state: elapsed, pose: { x: elapsed, y: 2, z: 3, opacity: 0.5, depth: 0.875 } }),
+    };
+    let frame!: Frame<number>;
+    const controller = createController({
+      target: {}, source, platform, measureViewport: viewport,
+      render: (next) => { frame = next; },
+    });
+    platform.fire(0);
+    platform.fire(50);
+    const before = frame;
+    const requests = platform.requests;
+    controller.setMarkerScale({ depthStrength: 2 });
+    expect(frame.elapsedSeconds).toBe(before.elapsedSeconds);
+    expect(frame.state).toBe(before.state);
+    expect(frame.pose).toEqual({ ...before.pose, depth: 0.75 });
+    expect(frame.position).toEqual(frame.project(frame.pose));
+    expect(frame.project(source.sample(0).pose).depth).toBe(0.875);
+    expect(controller.isPaused()).toBe(false);
+    expect(platform.requests).toBe(requests);
+    controller.pause();
+    controller.setMarkerScale({ depthStrength: 0 });
+    expect(frame.pose.depth).toBe(1);
+    expect(frame.elapsedSeconds).toBe(before.elapsedSeconds);
+    expect(controller.isPaused()).toBe(true);
+    expect(source.sample(0).pose.depth).toBe(0.875);
+    controller.reset();
+    expect(frame.elapsedSeconds).toBe(0);
+    expect(frame.pose.depth).toBe(1);
+    controller.dispose();
+  });
+
+  it('applies scale clamps after stateful pose interpolation', () => {
+    const platform = new FakePlatform();
+    let depth = 0;
+    const source: StatefulMotionSource<number> = {
+      kind: 'stateful', bounds,
+      step: () => { depth += 0.4; },
+      reset: () => { depth = 0; },
+      snapshot: () => ({ state: depth, pose: { x: 0, y: 0, depth } }),
+    };
+    let frame!: Frame<number>;
+    const controller = createController({
+      target: {}, source, platform, measureViewport: viewport,
+      markerScale: { minMarkerScale: 0.25, maxMarkerScale: 1 },
+      render: (next) => { frame = next; },
+    });
+    platform.fire(0);
+    platform.fire(10);
+    expect(frame.state).toBe(0.4);
+    expect(frame.pose.depth).toBe(0.25);
+    expect(source.snapshot().pose.depth).toBe(0.4);
+    platform.fire(15);
+    expect(frame.pose.depth).toBeCloseTo(0.32, 12);
+    controller.dispose();
+  });
+
+  it('rejects invalid marker updates atomically and rolls back a failed redraw', () => {
+    const platform = new FakePlatform();
+    const target = {};
+    let renders = 0;
+    let fail = false;
+    let depth: number | undefined;
+    const controller = createController({
+      target, source: analytic(), platform, measureViewport: viewport, autoplay: false,
+      markerScale: { minMarkerScale: 1.5 },
+      render: (frame) => {
+        if (fail) throw new Error('consumer render failed');
+        renders += 1;
+        depth = frame.pose.depth;
+      },
+    });
+    expect(depth).toBe(1.5);
+    expect(() => controller.setMarkerScale({ minMarkerScale: 2, maxMarkerScale: 1 })).toThrow(/Minimum.*maximum/);
+    expect(() => controller.setMarkerScale({ depthStrength: NaN })).toThrow(/finite/);
+    expect(renders).toBe(1);
+    fail = true;
+    expect(() => controller.setMarkerScale({ depthStrength: 0 })).toThrow(/consumer render failed/);
+    fail = false;
+    controller.setFraming({});
+    expect(depth).toBe(1.5);
+    expect(controller.isPaused()).toBe(true);
+    platform.resizeCallbacks.get(target)!();
+    expect(depth).toBe(1.5);
+    controller.dispose();
+    controller.setMarkerScale({ depthStrength: NaN });
+    expect(renders).toBe(3);
+  });
+
+  it('does not claim a target or source when initial scale settings are invalid', () => {
+    const platform = new FakePlatform();
+    const target = {};
+    const options = { target, source: analytic(), platform, measureViewport: viewport, render: () => undefined };
+    expect(() => createController({ ...options, markerScale: { maxMarkerScale: -1 } })).toThrow(/finite and nonnegative/);
+    const controller = createController(options);
+    controller.dispose();
+  });
+
   it('keeps advancing across repeated renderer redraw notifications and reactivates zero-sized targets', () => {
     const platform = new FakePlatform();
     let available!: (available: boolean) => void;

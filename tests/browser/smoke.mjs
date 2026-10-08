@@ -3,6 +3,33 @@ import { createServer } from 'node:http';
 import { mkdir, readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { chromium } from 'playwright';
+import ts from 'typescript';
+
+// Read public interfaces independently of the playground control definitions.
+const motionInterfaces = {
+  duffing: 'DuffingParams', ellipse: 'EllipseParams', helix: 'HelixParams',
+  lissajous: 'LissajousParams', lorenz: 'LorenzParams', rose: 'RoseParams', 'vander-pol': 'VanderPolParams',
+};
+const motionProgram = ts.createProgram([resolve('src/motions/index.ts')], {
+  noEmit: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+});
+const motionChecker = motionProgram.getTypeChecker();
+const motionModule = motionChecker.getSymbolAtLocation(motionProgram.getSourceFile(resolve('src/motions/index.ts')));
+assert.ok(motionModule, 'Public motion module is available for control coverage');
+const motionExports = motionChecker.getExportsOfModule(motionModule);
+const publicMotionControls = Object.fromEntries(Object.entries(motionInterfaces).map(([motion, name]) => {
+  const exported = motionExports.find((symbol) => symbol.name === name);
+  assert.ok(exported, `${name} is publicly exported`);
+  const symbol = exported.flags & ts.SymbolFlags.Alias ? motionChecker.getAliasedSymbol(exported) : exported;
+  const properties = motionChecker.getDeclaredTypeOfSymbol(symbol).getProperties();
+  return [motion, properties.map((property) => {
+    const type = motionChecker.getTypeOfSymbolAtLocation(property, property.valueDeclaration ?? property.declarations[0]);
+    const members = type.isUnion() ? type.types : [type];
+    const choices = members.filter((member) => member.flags & ts.TypeFlags.StringLiteral);
+    return { key: property.name, tag: choices.length ? 'SELECT' : 'INPUT' };
+  }).sort((a, b) => a.key.localeCompare(b.key))];
+}));
 
 const demoRoot = resolve('demo-dist');
 const libraryRoot = resolve('dist');
@@ -72,8 +99,45 @@ try {
     assert.equal(await page.locator('.renderer-panel:not([hidden])').getAttribute('id'), `panel-${renderer}`);
   };
   await assertActiveRenderer('webgl');
-  assert.equal(await page.locator('#motion').inputValue(), 'ellipse');
-  assert.equal(await page.locator('#fit').inputValue(), 'cover');
+  const assertMotionMenu = async (renderer, expectFirst = false) => {
+    const menu = await page.locator('#motion').evaluate((select) => ({
+      value: select.value,
+      first: select.options[0].value,
+      groups: [...select.querySelectorAll('optgroup')].map((group) => ({
+        label: group.label,
+        values: [...group.children].map((option) => option.value),
+        labels: [...group.children].map((option) => option.textContent.trim()),
+      })),
+      labels: [...select.options].map((option) => option.textContent.trim()),
+    }));
+    if (renderer === 'webgl') {
+      assert.deepEqual(menu.groups.map(({ label, values }) => ({ label, values })), [
+        { label: 'True 3D', values: ['helix', 'lissajous', 'lorenz'] },
+        { label: 'Other motions', values: ['duffing', 'ellipse', 'rose', 'vander-pol'] },
+      ], 'WebGL groups true XYZ motions before other motions');
+      for (const group of menu.groups) assert.deepEqual(group.labels, [...group.labels].sort((a, b) => a.localeCompare(b)), 'Each motion group is alphabetical');
+      assert.equal(menu.first, 'helix');
+    } else {
+      assert.deepEqual(menu.groups, [], `${renderer} has a flat motion menu`);
+      assert.deepEqual(menu.labels, [...menu.labels].sort((a, b) => a.localeCompare(b)), `${renderer} motions are alphabetical`);
+      assert.equal(menu.first, 'duffing');
+    }
+    if (expectFirst) assert.equal(menu.value, menu.first, `${renderer} defaults to its first motion option`);
+  };
+  const assertHelixDirectionDefaults = async () => {
+    for (const [label, values] of [
+      ['Rotation direction', ['counter-clockwise', 'clockwise']],
+      ['Flow direction', ['top-to-bottom', 'bottom-to-top', 'left-to-right', 'right-to-left']],
+    ]) {
+      const control = page.getByRole('combobox', { name: label, exact: true });
+      assert.deepEqual(await control.locator('option').evaluateAll((options) => options.map((option) => option.value)), values);
+      assert.equal(await control.inputValue(), values[0], `${label} defaults to the first option`);
+    }
+  };
+  await assertMotionMenu('webgl', true);
+  assert.equal(await page.locator('#fit').inputValue(), 'contain');
+  assert.equal(await page.locator('#webgl-view').inputValue(), 'spatial');
+  await assertHelixDirectionDefaults();
   await page.locator('#show-trail').focus();
   await page.keyboard.press('Space');
   assert.equal(await page.locator('#show-trail').evaluate((control) => control === document.activeElement), true, 'Reconfiguring the current renderer preserves control focus');
@@ -87,18 +151,23 @@ try {
   assert.equal(await page.locator('#tab-webgl').getAttribute('aria-selected'), 'true');
   await page.keyboard.press('Enter');
   await assertActiveRenderer('canvas');
+  await assertMotionMenu('canvas', true);
   await page.keyboard.press('End');
   assert.equal(await page.locator('#tab-svg').evaluate((tab) => tab === document.activeElement), true);
   await page.keyboard.press('Space');
   await assertActiveRenderer('svg');
+  await assertMotionMenu('svg', true);
   await page.keyboard.press('ArrowLeft');
   assert.equal(await page.locator('#tab-dom').evaluate((tab) => tab === document.activeElement), true);
   await page.keyboard.press('Enter');
   await assertActiveRenderer('dom');
+  await assertMotionMenu('dom', true);
   await page.keyboard.press('Home');
   assert.equal(await page.locator('#tab-webgl').evaluate((tab) => tab === document.activeElement), true);
   await page.keyboard.press('Enter');
   await assertActiveRenderer('webgl');
+  await assertMotionMenu('webgl', true);
+  assert.equal(await page.locator('#webgl-view').inputValue(), 'spatial');
   await page.keyboard.press('ArrowLeft');
   assert.equal(await page.locator('#tab-svg').evaluate((tab) => tab === document.activeElement), true, 'Left arrow wraps to the last tab');
   await page.keyboard.press('ArrowRight');
@@ -109,12 +178,15 @@ try {
     labels: [...select.options].map((option) => option.textContent.trim()),
   })));
   for (const { id, labels } of selectLabels) {
-    assert.deepEqual(labels, [...labels].sort((a, b) => a.localeCompare(b)), `${id} options are alphabetical, including disabled options`);
+    if (!['motion', 'helix-rotationDirection', 'helix-flowDirection'].includes(id)) assert.deepEqual(labels, [...labels].sort((a, b) => a.localeCompare(b)), `${id} options are alphabetical, including disabled options`);
   }
 
+  await page.selectOption('#motion', 'ellipse');
   for (const renderer of rendererOrder) {
     await switchRenderer(renderer);
     await assertActiveRenderer(renderer);
+    await assertMotionMenu(renderer);
+    assert.equal(await page.locator('#motion').inputValue(), 'ellipse', 'Explicitly chosen motion persists across renderer tabs');
     const placement = await page.evaluate((name) => {
       const panel = document.querySelector(`#panel-${name}`);
       const library = document.querySelector('#library-settings');
@@ -151,12 +223,17 @@ try {
   }
   await switchRenderer('webgl');
   await page.selectOption('#motion', 'helix');
-  await page.selectOption('#webgl-view', 'spatial');
+  assert.equal(await page.locator('#webgl-view').inputValue(), 'spatial', 'Selecting a supported motion defaults to spatial coordinates');
   assert.equal(await page.locator('#camera-config').isVisible(), true);
   assert.equal(await page.locator('#shading-config').isVisible(), true);
   await page.selectOption('#webgl-view', 'planar');
   assert.equal(await page.locator('#camera-config').isVisible(), false);
   assert.equal(await page.locator('#shading-config').isVisible(), false);
+  await page.locator('#zoom').fill('1.5');
+  await page.locator('#parameter-controls [data-parameter="turns"]').fill('5');
+  await page.locator('#parameter-controls [data-parameter="turns"]').press('Tab');
+  assert.equal(await page.locator('#webgl-view').inputValue(), 'planar', 'Framing and parameter changes retain an explicitly selected planar view');
+  await page.locator('#zoom').fill('1');
   await page.locator('#custom-bounds').check();
   await page.locator('#min-x').fill('');
   await switchRenderer('canvas');
@@ -176,6 +253,9 @@ try {
   assert.equal(await page.locator('#motion').inputValue(), 'lorenz', 'Renderer changes retain the motion');
   assert.equal(await page.locator('#fit').inputValue(), 'contain', 'Renderer changes retain shared configuration');
   assert.equal(await page.locator('#pause').textContent(), 'Resume', 'Renderer changes preserve manual pause');
+  await switchRenderer('webgl');
+  assert.equal(await page.locator('#motion').inputValue(), 'lorenz');
+  assert.equal(await page.locator('#webgl-view').inputValue(), 'spatial', 'Entering WebGL selects spatial coordinates for the retained supported motion');
   await page.click('#defaults');
 
   await page.setViewportSize({ width: 375, height: 812 });
@@ -183,6 +263,7 @@ try {
   for (const renderer of rendererOrder) {
     await switchRenderer(renderer);
     await assertActiveRenderer(renderer);
+    await assertMotionMenu(renderer, true);
   }
   await page.setViewportSize({ width: 1200, height: 900 });
   await page.click('#defaults');
@@ -208,6 +289,130 @@ try {
   assert.equal(await noWebGL.locator('#panel-canvas').isVisible(), true);
   await noWebGL.close();
 
+  // Every public factory option, including inherited numerical options, is exposed.
+  await page.evaluate(() => {
+    document.querySelector('#defaults').click();
+    document.querySelector('#pause').click();
+  });
+  const changeMotionParameter = (key, value) => page.evaluate(({ key, value }) => {
+    const control = document.querySelector(`#parameter-controls [data-parameter="${key}"]`);
+    control.value = String(value);
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+    return { value: control.value, status: document.querySelector('#status').textContent };
+  }, { key, value });
+  const controlDefaults = new Map();
+  for (const renderer of rendererOrder) {
+    await switchRenderer(renderer);
+    for (const motion of Object.keys(motionInterfaces)) {
+      await page.selectOption('#motion', motion);
+      const controls = await page.locator('#parameter-controls [data-parameter]').evaluateAll((elements) => elements.map((element) => ({
+        key: element.dataset.parameter, tag: element.tagName, value: element.value,
+        enabled: !element.disabled,
+        visible: element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0,
+      })).sort((a, b) => a.key.localeCompare(b.key)));
+      assert.deepEqual(controls.map(({ key, tag }) => ({ key, tag })), publicMotionControls[motion], `${motion} ${renderer} exposes each public option exactly once`);
+      assert.ok(controls.every(({ enabled, visible }) => enabled && visible), `${motion} ${renderer} public controls are visible and enabled`);
+      if (!controlDefaults.has(motion)) controlDefaults.set(motion, controls.map(({ key, value }) => ({ key, value })));
+      else assert.deepEqual(controls.map(({ key, value }) => ({ key, value })), controlDefaults.get(motion), `${motion} defaults are shared across renderer tabs`);
+    }
+  }
+  const acceptedParameters = {
+    ellipse: { periodSeconds: 0.5, radiusX: 0.05, radiusY: 0.075 },
+    rose: { periodSeconds: 0.5 },
+    helix: { periodSeconds: 0.5, turns: 0.5, fadeFraction: 0.007 },
+    lissajous: { periodSeconds: 0.5, cyclesX: 21, cyclesY: 22, cyclesZ: 23 },
+    'vander-pol': { mu: -0.5, timeScale: 0.005, runawayLimit: 0.5 },
+    duffing: { damping: -0.2, forcing: -0.1, angularFrequency: -1, timeScale: 0.005, runawayLimit: 0.75 },
+    lorenz: { sigma: 0, rho: -1, beta: 0, timeScale: 0.005, runawayLimit: 0.9 },
+  };
+  for (const [motion, parameters] of Object.entries(acceptedParameters)) {
+    await page.selectOption('#motion', motion);
+    for (const [key, value] of Object.entries(parameters)) {
+      const result = await changeMotionParameter(key, value);
+      assert.equal(result.value, String(value), `${motion} ${key} accepts the API-valid value ${value}`);
+      assert.match(result.status, /; contain at/, `${motion} ${key} mounts its accepted configuration`);
+    }
+  }
+  for (const renderer of rendererOrder) {
+    await switchRenderer(renderer);
+    for (const [motion, parameters] of Object.entries(acceptedParameters)) {
+      await page.selectOption('#motion', motion);
+      for (const [key, value] of Object.entries(parameters)) assert.equal(await page.locator(`#parameter-controls [data-parameter="${key}"]`).inputValue(), String(value), `${motion} ${key} survives motion and renderer switching`);
+    }
+  }
+  await page.selectOption('#motion', 'ellipse');
+  const retainedPeriod = await page.locator('#parameter-controls [data-parameter="periodSeconds"]').inputValue();
+  const beforeNumericMountFailure = await page.locator('#svg-marker').getAttribute('transform');
+  await page.evaluate(() => {
+    const control = document.querySelector('#depth-strength');
+    control.value = '-1';
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  const failedNumericMount = await changeMotionParameter('periodSeconds', 0.75);
+  assert.equal(failedNumericMount.value, retainedPeriod, 'A numeric option rolls back when another control blocks remounting');
+  assert.match(failedNumericMount.status, /finite and nonnegative/i);
+  assert.equal(await page.locator('#svg-marker').getAttribute('transform'), beforeNumericMountFailure, 'Failed numeric remount preserves the paused rendered source');
+  await page.evaluate(() => {
+    const control = document.querySelector('#depth-strength');
+    control.value = '1';
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  assert.equal(await page.locator('#parameter-controls [data-parameter="periodSeconds"]').inputValue(), retainedPeriod);
+  assert.match((await changeMotionParameter('periodSeconds', 0.75)).status, /; contain at/, 'Corrected shared settings permit the next valid numeric change');
+  for (const [motion, key, invalid] of [
+    ['ellipse', 'periodSeconds', 0], ['ellipse', 'radiusX', 0],
+    ['helix', 'turns', 0], ['helix', 'fadeFraction', 0], ['helix', 'fadeFraction', 0.5],
+    ['duffing', 'timeScale', 0], ['duffing', 'runawayLimit', 0],
+    ['lissajous', 'cyclesX', 1.5], ['lorenz', 'rho', ''],
+  ]) {
+    await page.selectOption('#motion', motion);
+    const control = page.locator(`#parameter-controls [data-parameter="${key}"]`);
+    const previous = await control.inputValue();
+    const result = await changeMotionParameter(key, invalid);
+    assert.equal(result.value, previous, `${motion} ${key} rejects ${invalid} and restores the committed value`);
+    assert.doesNotMatch(result.status, /; contain at/, 'Rejected numeric input reports an error');
+    const corrected = await changeMotionParameter(key, previous);
+    assert.match(corrected.status, /; contain at/, 'A valid correction clears the numeric error');
+  }
+  await page.click('#defaults');
+  await page.click('#pause');
+  for (const [motion, defaults] of controlDefaults) {
+    await page.selectOption('#motion', motion);
+    const values = await page.locator('#parameter-controls [data-parameter]').evaluateAll((elements) => elements.map((element) => ({ key: element.dataset.parameter, value: element.value })).sort((a, b) => a.key.localeCompare(b.key)));
+    assert.deepEqual(values, defaults, `${motion} Defaults restores every public option`);
+  }
+  for (const motion of ['vander-pol', 'duffing', 'lorenz']) {
+    await page.selectOption('#motion', motion);
+    assert.equal(await page.getByRole('spinbutton', { name: 'Runaway state limit', exact: true }).inputValue(), '1000000');
+  }
+  // A low state limit causes Duffing to reseed on each step; restoring the
+  // normal limit resumes evolution, demonstrating the example factory wiring.
+  await switchRenderer('dom');
+  await page.selectOption('#motion', 'duffing');
+  await changeMotionParameter('runawayLimit', 0.1);
+  await page.locator('#dom-stage').scrollIntoViewIfNeeded();
+  const sampleDuffing = () => page.evaluate(() => new Promise((resolveSamples) => {
+    const transforms = [];
+    const start = performance.now();
+    document.querySelector('#pause').click();
+    const sample = (timestamp) => {
+      transforms.push(document.querySelector('#dom-marker').style.transform);
+      if (timestamp - start < 250) requestAnimationFrame(sample);
+      else {
+        document.querySelector('#pause').click();
+        resolveSamples(transforms);
+      }
+    };
+    requestAnimationFrame(sample);
+  }));
+  const limitedDuffing = await sampleDuffing();
+  assert.ok(limitedDuffing.length > 2);
+  assert.equal(new Set(limitedDuffing).size, 1, 'The example passes runawayLimit to Duffing and repeatedly reseeds above the limit');
+  await changeMotionParameter('runawayLimit', 1000000);
+  const evolvingDuffing = await sampleDuffing();
+  assert.ok(new Set(evolvingDuffing).size > 2, 'Restoring the normal runaway limit allows actual DOM motion to evolve');
+  await page.click('#defaults');
+
   const initial = await page.evaluate(() => ({
     bitmap: [document.querySelector('#canvas-stage').width, document.querySelector('#canvas-stage').height],
     webglBitmap: [document.querySelector('#webgl-stage').width, document.querySelector('#webgl-stage').height],
@@ -223,7 +428,8 @@ try {
     assert.deepEqual(visibility, Object.fromEntries(['canvas', 'dom', 'svg', 'webgl'].map((name) => [name, name === renderer])));
     for (const motion of ['ellipse', 'rose', 'lissajous', 'helix', 'vander-pol', 'duffing', 'lorenz']) {
       await page.selectOption('#motion', motion);
-      assert.match(await page.locator('#status').textContent(), /; cover at/);
+      assert.match(await page.locator('#status').textContent(), /; contain at/);
+      if (renderer === 'webgl') assert.equal(await page.locator('#webgl-view').inputValue(), ['helix', 'lissajous', 'lorenz', 'duffing'].includes(motion) ? 'spatial' : 'planar', `${motion} chooses its supported default coordinate view`);
     }
   }
   await switchRenderer('svg');
@@ -423,6 +629,94 @@ try {
     }, seconds);
   };
 
+  // Direction controls preserve paused state and use the native motion coordinates.
+  await page.evaluate(() => {
+    document.querySelector('#defaults').click();
+    document.querySelector('#pause').click();
+  });
+  await switchRenderer('dom');
+  await page.selectOption('#motion', 'helix');
+  const directionSnapshot = () => page.evaluate(() => ({
+    transform: document.querySelector('#dom-marker').style.transform,
+    bounds: ['min-x', 'max-x', 'min-y', 'max-y'].map((id) => document.getElementById(id).value),
+  }));
+  const beforeRejectedDirection = await directionSnapshot();
+  for (const invalidStrength of [-1, '']) {
+    await webglChange('#depth-strength', invalidStrength);
+    for (const [label, attempted, committed] of [
+      ['Flow direction', 'left-to-right', 'top-to-bottom'],
+      ['Rotation direction', 'clockwise', 'counter-clockwise'],
+    ]) {
+      await page.getByRole('combobox', { name: label, exact: true }).selectOption(attempted);
+      assert.equal(await page.getByRole('combobox', { name: label, exact: true }).inputValue(), committed, 'Rejected direction change restores its committed choice');
+      assert.deepEqual(await directionSnapshot(), beforeRejectedDirection, 'Rejected direction change preserves native position and bounds');
+      assert.match(await page.locator('#status').textContent(), /finite and nonnegative/i);
+    }
+    await webglChange('#depth-strength', 1);
+    assert.deepEqual(await directionSnapshot(), beforeRejectedDirection, 'Correcting shared settings keeps the original flow');
+  }
+  await page.getByRole('combobox', { name: 'Rotation direction', exact: true }).selectOption('clockwise');
+  for (const flow of ['top-to-bottom', 'bottom-to-top', 'left-to-right', 'right-to-left']) {
+    await page.getByRole('combobox', { name: 'Flow direction', exact: true }).selectOption(flow);
+    assert.equal(await page.locator('#pause').textContent(), 'Resume', 'Direction changes retain manual pause');
+    const seed = await page.evaluate(() => {
+      const stage = document.querySelector('#dom-stage').getBoundingClientRect();
+      const marker = document.querySelector('#dom-marker').getBoundingClientRect();
+      return {
+        x: (marker.left + marker.right - stage.left - stage.right) / 2,
+        y: (marker.top + marker.bottom - stage.top - stage.bottom) / 2,
+        bounds: ['min-x', 'max-x', 'min-y', 'max-y'].map((id) => Number(document.getElementById(id).value)),
+      };
+    });
+    const horizontal = flow === 'left-to-right' || flow === 'right-to-left';
+    assert.deepEqual(seed.bounds, horizontal ? [0, 2, -1, 1] : [-1, 1, 0, 2], `${flow} exposes matching native bounds`);
+    const axisPosition = horizontal ? seed.x : seed.y;
+    const forward = flow === 'top-to-bottom' || flow === 'left-to-right';
+    assert.ok(forward ? axisPosition < -1 : axisPosition > 1, `${flow} starts at its named edge`);
+  }
+  await page.selectOption('#motion', 'ellipse');
+  await switchRenderer('svg');
+  await page.selectOption('#motion', 'helix');
+  assert.equal(await page.getByRole('combobox', { name: 'Rotation direction', exact: true }).inputValue(), 'clockwise');
+  assert.equal(await page.getByRole('combobox', { name: 'Flow direction', exact: true }).inputValue(), 'right-to-left', 'Direction choices survive motion and renderer switches');
+  await switchRenderer('webgl');
+  await webglChange('#webgl-camera', 'front');
+  await webglChange('#show-trail', true);
+  await webglChange('#trail-length', 0);
+  await page.locator('#webgl-stage').focus();
+  await page.keyboard.press('ArrowRight');
+  const rejectedDirectionScene = await webglReadout();
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'custom');
+  await page.getByRole('combobox', { name: 'Flow direction', exact: true }).selectOption('top-to-bottom');
+  assert.equal(await page.getByRole('combobox', { name: 'Flow direction', exact: true }).inputValue(), 'right-to-left');
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'custom', 'Rejected flow change preserves the dragged camera');
+  assert.deepEqual(await webglReadout(), rejectedDirectionScene, 'Invalid trail length keeps the old paused scene');
+  assert.match(await page.locator('#status').textContent(), /positive safe integer/);
+  await webglChange('#trail-length', 128);
+  assert.equal(await page.getByRole('combobox', { name: 'Flow direction', exact: true }).inputValue(), 'right-to-left', 'Correcting a trail limit retains the committed flow');
+  await webglChange('#show-trail', false);
+  for (const flow of ['top-to-bottom', 'bottom-to-top', 'left-to-right', 'right-to-left']) {
+    await page.getByRole('combobox', { name: 'Flow direction', exact: true }).selectOption(flow);
+    const first = await animateWebGLFor(0.4);
+    const second = await animateWebGLFor(0.4);
+    assert.ok(first.center && second.center, `${flow} paints its front view`);
+    const horizontal = flow === 'left-to-right' || flow === 'right-to-left';
+    const delta = second.center[horizontal ? 0 : 1] - first.center[horizontal ? 0 : 1];
+    // readPixels uses bottom-to-top rows, opposite CSS screen Y.
+    const positive = flow === 'left-to-right' || flow === 'bottom-to-top';
+    assert.ok(positive ? delta > 1 : delta < -1, `${flow} front view progresses in the selected screen direction`);
+  }
+  await page.getByRole('combobox', { name: 'Rotation direction', exact: true }).selectOption('counter-clockwise');
+  await animateWebGLFor(0.4);
+  const counterClockwiseSize = (await webglReadout()).size;
+  await page.getByRole('combobox', { name: 'Rotation direction', exact: true }).selectOption('clockwise');
+  await animateWebGLFor(0.4);
+  const clockwiseSize = (await webglReadout()).size;
+  assert.ok(counterClockwiseSize - clockwiseSize > 0.4, 'Reversed rotation mirrors the depth cue at the same early phase');
+  assert.ok(Math.abs(counterClockwiseSize + clockwiseSize - 1.25) < 0.05, 'Opposite rotation cues mirror around the native .625 midpoint');
+  await page.click('#defaults');
+  await assertHelixDirectionDefaults();
+
   // A reset supplies the same initial depth cue to every example renderer.
   // Read raster output synchronously with reset, before WebGL compositing.
   await page.evaluate(() => {
@@ -439,6 +733,7 @@ try {
         };
         change('#motion', motion);
         document.querySelector(`#tab-${renderer}`).click();
+        if (renderer === 'webgl') change('#webgl-view', 'planar');
         change('#fit', 'contain', 'input');
         change('#marker-size', '24');
         document.querySelector('#reset').click();
@@ -485,6 +780,178 @@ try {
     }
   }
 
+  // Shared presentation changes redraw the same paused frame on every renderer.
+  const changeMarkerScale = (id, value) => webglChange(`#${id}`, value);
+  const assertMarkerScale = async (renderer, scale) => {
+    const marker = await page.locator(renderer === 'dom' ? '#dom-marker' : '#svg-marker circle').evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const svg = element.ownerSVGElement;
+      const transform = svg ? element.parentElement.getAttribute('transform') : element.style.transform;
+      const scale = Number(transform.match(/scale\(([^)]+)\)/)[1]);
+      if (!svg) return { extents: [rect.width, rect.height], pixelScales: [1, 1], scale };
+      // SVG meet mapping uses the fractional viewport; radius uses clientWidth.
+      const coordinatesPerPixel = svg.viewBox.baseVal.width / svg.clientWidth;
+      const mapping = svg.getScreenCTM();
+      return {
+        extents: [rect.width, rect.height],
+        pixelScales: [Math.hypot(mapping.a, mapping.b), Math.hypot(mapping.c, mapping.d)].map((value) => value * coordinatesPerPixel),
+        scale,
+      };
+    });
+    assert.ok(Math.abs(marker.scale - scale) < 1e-12, `${renderer} receives exact shared marker scale ${scale}`);
+    for (const [axis, extent] of marker.extents.entries()) {
+      const expected = 48 * scale * marker.pixelScales[axis];
+      assert.ok(Math.abs(extent - expected) < 0.05, `${renderer} marker extent should map to ${expected}, got ${extent}`);
+    }
+    assert.equal(await page.locator('#pause').textContent(), 'Resume', 'Live marker changes preserve manual pause');
+  };
+  const assertContainedMarker = async (renderer) => {
+    const contained = await page.evaluate((renderer) => {
+      const marker = document.querySelector(renderer === 'dom' ? '#dom-marker' : '#svg-marker circle').getBoundingClientRect();
+      const stage = document.querySelector(`#${renderer}-stage`).getBoundingClientRect();
+      return marker.left >= stage.left - 0.05 && marker.right <= stage.right + 0.05
+        && marker.top >= stage.top - 0.05 && marker.bottom <= stage.bottom + 0.05;
+    }, renderer);
+    assert.equal(contained, true, `${renderer} contain framing reserves the effective marker radius`);
+  };
+  await page.selectOption('#motion', 'lorenz');
+  await switchRenderer('dom');
+  for (const [id, label, value] of [
+    ['depth-strength', 'Depth strength', '1'],
+    ['min-marker-scale', 'Minimum marker scale', '0.25'],
+    ['max-marker-scale', 'Maximum marker scale', '1'],
+  ]) {
+    assert.equal(await page.getByRole('spinbutton', { name: label, exact: true }).inputValue(), value);
+    assert.equal(await page.locator(`#${id}`).getAttribute('min'), '0');
+    assert.equal(await page.locator(`#${id}`).getAttribute('step'), 'any');
+  }
+  assert.equal(await page.locator('#clamp-marker-scale').isChecked(), false);
+  assert.equal(await page.locator('#min-marker-scale').isDisabled(), true);
+  assert.equal(await page.locator('#max-marker-scale').isDisabled(), true);
+  assert.equal(await page.locator('#parameter-controls [data-parameter="depthStrength"]').count(), 0);
+  await webglChange('#parameter-controls [data-parameter="initialX"]', 20);
+  await assertMarkerScale('dom', 0.875);
+  await changeMarkerScale('depth-strength', 0);
+  await assertMarkerScale('dom', 1);
+  await changeMarkerScale('depth-strength', 0.5);
+  await assertMarkerScale('dom', 0.9375);
+  await page.selectOption('#motion', 'ellipse');
+  await assertMarkerScale('dom', 1.25);
+  await changeMarkerScale('depth-strength', 1);
+  await assertMarkerScale('dom', 1.5);
+  await changeMarkerScale('depth-strength', 3);
+  await assertMarkerScale('dom', 2.5);
+  await assertContainedMarker('dom');
+  await changeMarkerScale('depth-strength', 1);
+  await changeMarkerScale('clamp-marker-scale', true);
+  await assertMarkerScale('dom', 1);
+  assert.equal(await page.locator('#min-marker-scale').isDisabled(), false);
+  await changeMarkerScale('max-marker-scale', 2);
+  await changeMarkerScale('min-marker-scale', 0.5);
+  await assertMarkerScale('dom', 1.5);
+  await changeMarkerScale('depth-strength', 3);
+  await assertMarkerScale('dom', 2);
+  await switchRenderer('svg');
+  await assertMarkerScale('svg', 2);
+  await switchRenderer('canvas');
+  const canvasScaleSize = await page.evaluate(() => {
+    const control = document.querySelector('#depth-strength');
+    control.value = '0';
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+    const canvas = document.querySelector('#canvas-stage');
+    const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    let minX = canvas.width, maxX = -1, minY = canvas.height, maxY = -1;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      if (!pixels[offset + 3]) continue;
+      const x = (offset / 4) % canvas.width, y = Math.floor(offset / 4 / canvas.width);
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    }
+    const rect = canvas.getBoundingClientRect();
+    return [(maxX - minX + 1) * rect.width / canvas.width, (maxY - minY + 1) * rect.height / canvas.height];
+  });
+  assert.ok(canvasScaleSize.every((extent) => Math.abs(extent - 48) < 2), 'Canvas live strength zero uses the base marker radius');
+  await switchRenderer('svg');
+  await changeMarkerScale('min-marker-scale', 2);
+  await changeMarkerScale('depth-strength', 0);
+  await assertMarkerScale('svg', 2);
+
+  const invalidScaleTransform = await page.locator('#svg-marker').getAttribute('transform');
+  for (const [id, value, message] of [
+    ['max-marker-scale', 1, /minimum.*maximum/i],
+    ['max-marker-scale', -1, /finite and nonnegative/i],
+    ['max-marker-scale', '1e309', /finite and nonnegative/i],
+  ]) {
+    await changeMarkerScale(id, value);
+    assert.match(await page.locator('#status').textContent(), message);
+    assert.equal(await page.locator('#svg-marker').getAttribute('transform'), invalidScaleTransform, 'Invalid scale leaves the current frame unchanged');
+  }
+  // A failed renderer switch validates before disposing the current animation.
+  await switchRenderer('canvas');
+  await assertActiveRenderer('svg');
+  await changeMarkerScale('max-marker-scale', 2);
+  await assertMarkerScale('svg', 2);
+  assert.match(await page.locator('#status').textContent(), /; contain at/, 'A valid correction clears the error');
+  for (const invalidStrength of [-1, '']) {
+    await changeMarkerScale('depth-strength', invalidStrength);
+    const beforeMotionSwitch = await page.locator('#svg-marker').getAttribute('transform');
+    await page.selectOption('#motion', 'rose');
+    assert.equal(await page.locator('#motion').inputValue(), 'ellipse', 'Invalid strength rolls back a no-cue motion switch');
+    assert.equal(await page.locator('#depth-strength').isDisabled(), false, 'Rejected switch leaves strength editable');
+    assert.equal(await page.locator('#parameter-controls [data-parameter="radiusX"]').count(), 1, 'Rejected switch preserves the mounted motion parameters');
+    assert.equal(await page.locator('#svg-marker').getAttribute('transform'), beforeMotionSwitch, 'Rejected switch preserves the current animation');
+    assert.match(await page.locator('#status').textContent(), /finite and nonnegative/i);
+    await changeMarkerScale('depth-strength', 0.8);
+  }
+  await changeMarkerScale('min-marker-scale', '');
+  assert.match(await page.locator('#status').textContent(), /finite and nonnegative/i);
+  await changeMarkerScale('depth-strength', 0.8);
+  await changeMarkerScale('min-marker-scale', 0.5);
+  await assertMarkerScale('svg', 1.4);
+
+  for (const motion of ['lissajous', 'helix', 'duffing', 'rose', 'vander-pol']) {
+    await page.selectOption('#motion', motion);
+    const noCue = ['rose', 'vander-pol'].includes(motion);
+    assert.equal(await page.locator('#depth-strength').isDisabled(), noCue, `${motion} advertises whether strength has a depth cue`);
+    assert.equal(await page.locator('#depth-strength').inputValue(), '0.8', 'Motion switches persist depth strength');
+    await assertMarkerScale('svg', noCue ? 1 : 0.7);
+  }
+  // Clamps still apply to motions without a depth cue.
+  await changeMarkerScale('max-marker-scale', 3);
+  await changeMarkerScale('min-marker-scale', 3);
+  await assertMarkerScale('svg', 3);
+  await assertContainedMarker('svg');
+  await page.selectOption('#motion', 'lorenz');
+  await changeMarkerScale('min-marker-scale', 0.5);
+  await changeMarkerScale('max-marker-scale', 2);
+  await assertMarkerScale('svg', 0.9);
+  await switchRenderer('webgl');
+  assert.equal((await webglReadout()).size, 0.9);
+  assert.equal(await page.locator('#clamp-marker-scale').isChecked(), true);
+  assert.equal(await page.locator('#max-marker-scale').inputValue(), '2');
+  await webglChange('#show-trail', true);
+  await animateWebGLFor(0.4);
+  const beforeLiveScale = await webglReadout();
+  const withHistory = await changeMarkerScale('depth-strength', 0);
+  assert.equal((await webglReadout()).time, beforeLiveScale.time, 'Live scale change preserves stateful motion time');
+  assert.equal((await webglReadout()).size, 1, 'WebGL strength zero uses the base marker radius');
+  const markerOnly = await webglClick('#reset');
+  assert.ok(withHistory.count > markerOnly.count, 'Live scale change retains the existing WebGL trail');
+  await page.click('#defaults');
+  await page.click('#pause');
+  for (const [id, value] of [['depth-strength', '1'], ['min-marker-scale', '0.25'], ['max-marker-scale', '1']]) {
+    assert.equal(await page.locator(`#${id}`).inputValue(), value, 'Defaults reset shared marker scale values');
+  }
+  assert.equal(await page.locator('#clamp-marker-scale').isChecked(), false);
+  assert.equal(await page.locator('#min-marker-scale').isDisabled(), true);
+  assert.equal(await page.locator('#max-marker-scale').isDisabled(), true);
+  assert.equal(await page.locator('#depth-strength').isDisabled(), false);
+  await webglClick('#reset');
+  assert.equal((await webglReadout()).size, 0.63, 'Default Helix sizing rounds its native .625 seed cue');
+  assert.equal(await page.locator('#motion').inputValue(), 'helix');
+  assert.equal(await page.locator('#fit').inputValue(), 'contain');
+  assert.equal(await page.locator('#webgl-view').inputValue(), 'spatial');
+
   await page.selectOption('#motion', 'lissajous');
   await switchRenderer('dom');
   await page.locator('#parameter-controls [data-parameter="periodSeconds"]').fill('4');
@@ -511,6 +978,7 @@ try {
   assert.ok(Math.max(...depthScales) - Math.min(...depthScales) > 0.1, 'Lissajous Z motion changes the planar marker size');
 
   await page.click('#defaults');
+  await page.selectOption('#motion', 'ellipse'); // Planar raster fixtures explicitly select their motion.
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await switchRenderer('webgl');
   await page.evaluate(() => document.querySelector('#pause').click());
@@ -582,6 +1050,7 @@ try {
     await webglChange('#motion', motion);
     assert.equal(await page.locator('#pause').textContent(), 'Resume', 'Remount preserves manual pause');
     assert.equal(await page.locator('#webgl-view option[value="spatial"]').evaluate((option) => option.disabled), false);
+    assert.equal(await page.locator('#webgl-view').inputValue(), 'spatial', `${motion} defaults to its supported spatial view`);
     await webglChange('#webgl-camera', 'front');
     await webglChange('#webgl-view', 'spatial');
     assert.equal(await page.locator('#webgl-camera').isDisabled(), false);
@@ -871,9 +1340,12 @@ try {
   assert.equal(await page.locator('#webgl-view option[value="spatial"]').evaluate((option) => option.disabled), true);
   await page.click('#defaults');
   assert.equal(await page.locator('#tab-webgl').getAttribute('aria-selected'), 'true');
-  assert.equal(await page.locator('#motion').inputValue(), 'ellipse');
+  await assertMotionMenu('webgl', true);
+  await assertHelixDirectionDefaults();
+  assert.equal(await page.locator('#motion').inputValue(), 'helix');
+  assert.equal(await page.locator('#fit').inputValue(), 'contain');
   assert.equal(await page.locator('#pause').textContent(), 'Pause');
-  assert.equal(await page.locator('#webgl-view').inputValue(), 'planar');
+  assert.equal(await page.locator('#webgl-view').inputValue(), 'spatial');
   assert.equal(await page.locator('#webgl-camera').inputValue(), 'oblique');
   assert.equal(await page.locator('#webgl-shape').inputValue(), 'circle');
   assert.equal(await page.locator('#webgl-paint').isChecked(), false);
@@ -1090,13 +1562,14 @@ try {
 
   await page.evaluate(async () => {
     const { animateWebGL } = await import('/lib/webgl/index.js');
+    const { createHelixMotion } = await import('/lib/motions/helix.js');
     const bounds = { minX: -1, maxX: 1, minY: -1, maxY: 1 };
     const red = [255, 0, 0, 255];
     const green = [0, 255, 0, 255];
     const blank = [0, 0, 0, 0];
     const check = (condition, message) => { if (!condition) throw new Error(message); };
     const fixtures = [];
-    const fixture = (samples, options = {}) => {
+    const fixture = (samples, options = {}, motion) => {
       const canvas = document.createElement('canvas');
       canvas.width = canvas.height = 100;
       canvas.style.cssText = 'position:fixed;left:20px;top:20px;width:100px;height:100px';
@@ -1119,7 +1592,7 @@ try {
         observeVisibility(callback) { observers.visibility = callback; return () => { delete observers.visibility; }; },
         observeReducedMotion(callback) { observers.reduced = callback; return () => { delete observers.reduced; }; },
       };
-      const source = {
+      const source = motion ?? {
         kind: 'analytic', bounds, periodSeconds: 1,
         sample(elapsedSeconds) {
           sampledTime = elapsedSeconds;
@@ -1145,8 +1618,8 @@ try {
       });
       const gl = canvas.getContext('webgl');
       check(gl !== null, 'Chromium did not provide the WebGL context');
-      const step = () => {
-        time += 16;
+      const step = (milliseconds = 16) => {
+        time += milliseconds;
         const callbacks = [...pending.values()];
         pending.clear();
         callbacks.forEach((callback) => callback(time));
@@ -1205,6 +1678,28 @@ try {
       };
     };
     try {
+      for (const drawing of [
+        { trail: { maxSamples: 12, width: 6 } },
+        { paint: { maxSamples: 12, limitBehavior: 'pause' } },
+        { paint: { maxSamples: 12, limitBehavior: 'trim-oldest' } },
+      ]) {
+        const label = drawing.trail ? 'Helix tail' : `Helix ${drawing.paint.limitBehavior} paint`;
+        const helix = fixture([], { accumulate: false, ...drawing }, createHelixMotion({ periodSeconds: 0.18, turns: 1 }));
+        helix.controller.resume();
+        helix.step(0);
+        for (let frame = 0; frame < 4; frame++) helix.step(40);
+        helix.pixel(57, 22, red, `${label} retains its first-cycle segment`);
+        helix.step(40); // .16 -> .20 crosses the .18-second Helix wrap.
+        helix.pixel(88, 50, blank, `${label} does not bridge the wrap at the right edge`);
+        helix.pixel(57, 22, red, `${label} preserves the completed cycle`);
+        helix.step(40);
+        helix.controller.pause();
+        helix.pixel(57, 78, red, `${label} draws the new cycle`);
+        helix.controller.setFraming({ fit: 'stretch', padding: 0 });
+        helix.pixel(88, 50, blank, `${label} stays disconnected on paused redraw`);
+        helix.pixel(57, 22, red, `${label} keeps old geometry on paused redraw`);
+        helix.dispose();
+      }
       const tail = fixture([
         { pose: { x: -0.8 }, skip: true }, { pose: { x: -0.4 }, skip: true },
         { pose: { x: 0.4, depth: 0.01 }, skip: true }, { pose: { x: 0.8 }, skip: true },
