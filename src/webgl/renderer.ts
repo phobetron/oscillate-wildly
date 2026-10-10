@@ -1,5 +1,7 @@
 import type { Pose, ProjectedPose, Viewport } from '../core';
 import type { PaintFootprints, RibbonGeometry } from './ribbon';
+import { resolveWebGLLighting } from './lighting';
+import type { ResolvedWebGLLighting } from './lighting';
 
 /** Opaque RGB channels in the range [0, 1]. */
 export type WebGLColor = readonly [number, number, number];
@@ -239,24 +241,47 @@ export const createMarkerRenderer = (gl: WebGLRenderingContext) => {
   const lightingSource = `
 uniform bool lightingEnabled;
 uniform ${depthPrecision} vec3 lightingViewScale;
+uniform vec3 lightingAmbientColor;
+uniform float lightingAmbientIntensity;
+uniform vec3 lightingDirection;
+uniform vec3 lightingDirectionalColor;
+uniform float lightingDirectionalIntensity;
+uniform float lightingSpecularIntensity;
+uniform float lightingShininess;
+uniform float lightingDepthCueStrength;
 varying ${depthPrecision} float surfaceDepth;
 vec4 shade(vec3 base) {
   if (!lightingEnabled) return vec4(base, 1.0);
   ${depthPrecision} vec3 normal = ${derivatives ? `normalize(vec3(
     dFdx(surfaceDepth) * lightingViewScale.z / (2.0 * lightingViewScale.x),
     dFdy(surfaceDepth) * lightingViewScale.z / (2.0 * lightingViewScale.y), 1.0))` : 'vec3(0.0, 0.0, 1.0)'};
-  vec3 light = normalize(vec3(-0.45, 0.65, 1.0));
-  float diffuse = max(dot(normal, light), 0.0);
-  vec3 halfway = normalize(light + vec3(0.0, 0.0, 1.0));
-  float specular = 0.12 * pow(max(dot(normal, halfway), 0.0), 24.0);
-  float attenuation = 1.0 - 0.3 * clamp(surfaceDepth * 0.5 + 0.5, 0.0, 1.0);
-  return vec4((base * (0.3 + 0.7 * diffuse) + vec3(specular)) * attenuation, 1.0);
+  vec3 light = lightingDirection;
+  float diffuse = clamp(dot(normal, light), 0.0, 1.0);
+  vec3 halfway = light + vec3(0.0, 0.0, 1.0);
+  float halfwayLength = length(halfway);
+  float specular = 0.0;
+  if (diffuse > 0.0 && halfwayLength > 0.00001) {
+    specular = lightingSpecularIntensity * pow(clamp(dot(normal, halfway / halfwayLength), 0.0, 1.0), lightingShininess);
+  }
+  float attenuation = 1.0 - lightingDepthCueStrength * clamp(surfaceDepth * 0.5 + 0.5, 0.0, 1.0);
+  return vec4((base * (lightingAmbientColor * lightingAmbientIntensity
+    + lightingDirectionalColor * lightingDirectionalIntensity * diffuse)
+    + lightingDirectionalColor * specular) * attenuation, 1.0);
 }`;
-  let lightingEnabled = false;
+  let lighting = resolveWebGLLighting(false);
+  let lightingDirection = lighting.direction;
   let lightingViewScale: readonly [number, number, number] = [1, 1, 1];
   const lightingUniforms = new Map<WebGLProgram, {
     enabled: WebGLUniformLocation | null;
     viewScale: WebGLUniformLocation | null;
+    ambientColor: WebGLUniformLocation | null;
+    ambientIntensity: WebGLUniformLocation | null;
+    direction: WebGLUniformLocation | null;
+    directionalColor: WebGLUniformLocation | null;
+    directionalIntensity: WebGLUniformLocation | null;
+    specularIntensity: WebGLUniformLocation | null;
+    shininess: WebGLUniformLocation | null;
+    depthCueStrength: WebGLUniformLocation | null;
   }>();
   const geometryProgram = (vertexSource: string, fragmentSource: string, attributes?: readonly string[], smooth = false): WebGLProgram => {
     const source = smooth ? lightingSource.replace('vec4 shade(vec3 base)',
@@ -274,13 +299,30 @@ vec4 shade(vec3 base) {
     lightingUniforms.set(result, {
       enabled: gl.getUniformLocation(result, 'lightingEnabled'),
       viewScale: gl.getUniformLocation(result, 'lightingViewScale'),
+      ambientColor: gl.getUniformLocation(result, 'lightingAmbientColor'),
+      ambientIntensity: gl.getUniformLocation(result, 'lightingAmbientIntensity'),
+      direction: gl.getUniformLocation(result, 'lightingDirection'),
+      directionalColor: gl.getUniformLocation(result, 'lightingDirectionalColor'),
+      directionalIntensity: gl.getUniformLocation(result, 'lightingDirectionalIntensity'),
+      specularIntensity: gl.getUniformLocation(result, 'lightingSpecularIntensity'),
+      shininess: gl.getUniformLocation(result, 'lightingShininess'),
+      depthCueStrength: gl.getUniformLocation(result, 'lightingDepthCueStrength'),
     });
     return result;
   };
   const applyLighting = (geometry: WebGLProgram): void => {
     const uniforms = lightingUniforms.get(geometry)!;
-    gl.uniform1i(uniforms.enabled, lightingEnabled ? 1 : 0);
+    gl.uniform1i(uniforms.enabled, lighting.enabled ? 1 : 0);
     gl.uniform3f(uniforms.viewScale, lightingViewScale[0], lightingViewScale[1], lightingViewScale[2]);
+    gl.uniform3f(uniforms.ambientColor, ...lighting.ambientColor);
+    gl.uniform1f(uniforms.ambientIntensity, lighting.ambientIntensity);
+    gl.uniform3f(uniforms.direction, ...lightingDirection);
+    gl.uniform3f(uniforms.directionalColor, ...lighting.directionalColor);
+    gl.uniform1f(uniforms.directionalIntensity, lighting.directionalIntensity);
+    // Preserve the legacy 0.12 highlight strength at the default 0.7 light intensity.
+    gl.uniform1f(uniforms.specularIntensity, lighting.specularIntensity * lighting.directionalIntensity / 0.7);
+    gl.uniform1f(uniforms.shininess, lighting.shininess);
+    gl.uniform1f(uniforms.depthCueStrength, lighting.depthCueStrength);
   };
   let markerProgram: WebGLProgram | undefined;
   let markersProgram: WebGLProgram | undefined;
@@ -493,11 +535,12 @@ vec4 shade(vec3 base) {
   return {
     dispose,
     /** World units per backing pixel (X/Y), and the camera depth span. */
-    setLighting(enabled: boolean, viewScale: readonly [number, number, number]): void {
+    setLighting(value: boolean | ResolvedWebGLLighting, viewScale: readonly [number, number, number], direction?: readonly [number, number, number]): void {
       if (viewScale.length !== 3 || !viewScale.every((value) => Number.isFinite(value) && value > 0)) {
         throw new RangeError('WebGL lighting view scale must contain three finite positive values');
       }
-      lightingEnabled = enabled;
+      lighting = typeof value === 'boolean' ? resolveWebGLLighting(value) : value;
+      lightingDirection = direction ?? lighting.direction;
       lightingViewScale = [viewScale[0], viewScale[1], viewScale[2]];
     },
     resize(nextWidth: number, nextHeight: number): boolean {

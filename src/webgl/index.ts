@@ -7,8 +7,11 @@ import { createMarkerRenderer } from './renderer';
 import type { WebGLMarker, WebGLMarkerOptions, WebGLTrailStyle } from './renderer';
 import { createRibbonBrush, createTrimmingPaintBrush } from './ribbon';
 import type { PaintBrush } from './ribbon';
+import { lightingDirectionInView, resolveWebGLLighting } from './lighting';
+import type { WebGLLightingOptions } from './lighting';
 
 export type { WebGLColor, WebGLMarkerOptions } from './renderer';
+export type { WebGLLightingOptions } from './lighting';
 
 export interface WebGLProjectedPose extends ProjectedPose {
   /** Near = 0, far = 1. Positions outside this interval are clipped. */
@@ -45,8 +48,8 @@ export interface AnimateWebGLOptions<State> {
   readonly autoplay?: boolean;
   /** Defaults to true, as with the Canvas adapter. */
   readonly offscreen?: boolean;
-  /** Shade all drawing at render time with surface lighting and a depth cue. Defaults to false (flat base colors). */
-  readonly lighting?: boolean;
+  /** Defaults to false (flat base colors). true or an options object enables render-time lighting; omitted fields use the default model. */
+  readonly lighting?: boolean | WebGLLightingOptions;
   /** Retain bounded world-space markers, including across view changes. true uses defaults. Defaults to false. */
   readonly accumulate?: boolean | WebGLAccumulationOptions;
   /** Paint a connected ribbon using the marker footprint, independently of marker shape. Exclusive with trail and accumulate. */
@@ -73,8 +76,8 @@ export interface WebGLController extends Controller {
   clear(): void;
   /** Reproject all retained drawing without changing motion/pause. undefined returns to planar mode. */
   setCamera(camera: OrthographicCamera | undefined): void;
-  /** Change shading and redraw retained geometry without changing motion, samples, or pause state. */
-  setLighting(enabled: boolean): void;
+  /** Replace shading and redraw retained geometry without changing motion, samples, or pause state. true restores defaults; objects are snapshotted. */
+  setLighting(lighting: boolean | WebGLLightingOptions): void;
 }
 
 const snapshotCamera = (camera: OrthographicCamera | undefined): OrthographicCamera | undefined => {
@@ -141,6 +144,10 @@ export const animateWebGL = <State>(
   let previousMarkerTime: number | undefined;
   let previousMarker: WebGLMarker | undefined;
   let markerRendererNeedsRestore = true;
+  let redrawDrawing: (() => void) | undefined;
+  let lastDrawInput: { pose: Pose; planarDepth: number; marker: WebGLMarkerOptions | null } | undefined;
+  let restoring = false;
+  let drawingCleared = false;
   if (trail) {
     if (!Number.isFinite(trail.width ?? 1) || (trail.width ?? 1) < 0) {
       throw new RangeError('WebGL trail width must be finite and non-negative');
@@ -153,11 +160,13 @@ export const animateWebGL = <State>(
   const clearHistory = (): void => {
     history?.clear(); markers?.clear(); ribbon?.clear(); previousBrushPose = undefined; brushBasis = undefined; previousMarkerTime = undefined; previousMarker = undefined; markerRendererNeedsRestore = true;
     previousBrushPathSegment = undefined;
+    redrawDrawing = undefined;
+    lastDrawInput = undefined;
+    drawingCleared = false;
   };
   let camera = snapshotCamera(options.camera);
   let framing = options.framing ?? {};
-  let lighting = options.lighting ?? false;
-  if (typeof lighting !== 'boolean') throw new TypeError('WebGL lighting must be a boolean');
+  let lighting = resolveWebGLLighting(options.lighting === undefined ? false : options.lighting);
   const gl = canvas.getContext('webgl', { alpha: true, depth: true, antialias: false });
   if (!gl) throw new TypeError('canvas must provide a WebGL rendering context');
 
@@ -211,10 +220,13 @@ export const animateWebGL = <State>(
             renderer = createMarkerRenderer(gl);
             lost = false;
             markerRendererNeedsRestore = true;
+            restoring = true;
             notify(true);
           } catch (error) {
             controller?.dispose();
             throw error;
+          } finally {
+            restoring = false;
           }
         };
         canvas.addEventListener('webglcontextlost', onLost);
@@ -238,9 +250,22 @@ export const animateWebGL = <State>(
         };
       },
       render(frame) {
-        if (lost || !renderer) return;
-        const pose = options.position ? { ...frame.pose, ...options.position(frame) } : frame.pose;
-        const planarDepth = camera ? 0.5 : typeof options.visibilityDepth === 'function'
+        if (lost || !renderer) {
+          // An explicit presentation update while unavailable must be applied
+          // on recovery. Lighting-only updates bypass this render callback.
+          lastDrawInput = undefined;
+          drawingCleared = false;
+          return;
+        }
+        if (restoring && drawingCleared) {
+          renderer.resize(canvas.width, canvas.height);
+          renderer.clear();
+          renderer.present();
+          return;
+        }
+        const replay = restoring ? lastDrawInput : undefined;
+        const pose = replay ? replay.pose : options.position ? { ...frame.pose, ...options.position(frame) } : frame.pose;
+        const planarDepth = replay ? replay.planarDepth : camera ? 0.5 : typeof options.visibilityDepth === 'function'
           ? options.visibilityDepth(frame)
           : options.visibilityDepth ?? 0.5;
         const project = (point: Pose): WebGLProjectedPose => camera
@@ -248,15 +273,20 @@ export const animateWebGL = <State>(
           : { ...frame.project(point), visibilityDepth: planarDepth };
         const position = project(pose);
         const webglFrame: WebGLFrame<State> = { ...frame, pose, position, project };
-        const resized = renderer.resize(canvas.width, canvas.height);
         const scaleX = Math.abs(position.scaleX);
         const scaleY = Math.abs(position.scaleY);
-        renderer.setLighting(lighting, [
+        const viewScale: readonly [number, number, number] = [
           scaleX > 0 ? frame.viewport.width / canvas.width / scaleX : 1,
           scaleY > 0 ? frame.viewport.height / canvas.height / scaleY : 1,
           camera ? (camera.far ?? 100) - (camera.near ?? 0.1) : 1,
-        ]);
-        const marker = typeof options.marker === 'function' ? options.marker(webglFrame) : options.marker ?? {};
+        ];
+        // Validate the view before changing retained samples or their buffers.
+        let resized = renderer.resize(canvas.width, canvas.height);
+        renderer.setLighting(lighting, viewScale, lightingDirectionInView(lighting, camera));
+        const appearance = replay ? replay.marker : typeof options.marker === 'function' ? options.marker(webglFrame) : options.marker ?? {};
+        const marker: WebGLMarkerOptions | null = appearance === null ? null : {
+          ...appearance, color: appearance.color ? [...appearance.color] as [number, number, number] : undefined,
+        };
         currentBrush = paint !== undefined && marker !== null;
         const retainedMarker: WebGLMarker | undefined = markers && marker !== null && !currentBrush ? {
           pose: { ...pose }, visibilityDepth: planarDepth,
@@ -272,8 +302,7 @@ export const animateWebGL = <State>(
           || retainedMarker.options.color!.length !== previousMarker.options.color!.length
           || retainedMarker.options.color!.some((channel, index) => channel !== previousMarker!.options.color![index]));
         const replacingMarker = markerChanged && sameMarkerTime;
-        if (!resized) renderer.clear();
-        if (markers && retainedMarker && markerChanged) {
+        if (!replay && markers && retainedMarker && markerChanged) {
           if (![pose.x, pose.y, pose.z ?? 0, planarDepth].every(Number.isFinite)) {
             throw new RangeError('WebGL accumulated coordinates and visibility depth must be finite');
           }
@@ -281,26 +310,14 @@ export const animateWebGL = <State>(
           previousMarkerTime = frame.elapsedSeconds;
           previousMarker = retainedMarker;
         }
-        if (markers) {
-          if (markerRendererNeedsRestore) {
-            renderer.setMarkers(markers.values(), accumulationLimit);
-            markerRendererNeedsRestore = false;
-          } else if (retainedMarker && markerChanged) renderer.addMarker(retainedMarker, accumulationLimit, replacingMarker);
-        }
+        if (markers && !markerRendererNeedsRestore && !replay && retainedMarker && markerChanged) renderer.addMarker(retainedMarker, accumulationLimit, replacingMarker);
         if (trail && history) {
           if (![pose.x, pose.y, pose.z ?? 0, planarDepth].every(Number.isFinite)) {
             throw new RangeError('WebGL trail coordinates and visibility depth must be finite');
           }
-          history.add({ pose: { ...pose }, visibilityDepth: planarDepth }, frame.elapsedSeconds, frame.pathSegment);
-          for (const samples of history.segments()) {
-            const positions = samples.map((retained) => {
-              const projected = project(retained.pose);
-              return camera ? projected : { ...projected, visibilityDepth: retained.visibilityDepth };
-            });
-            renderer.drawTrail(positions, frame.viewport, { width: trail.width, color: trail.color ?? marker?.color });
-          }
+          if (!replay) history.add({ pose: { ...pose }, visibilityDepth: planarDepth }, frame.elapsedSeconds, frame.pathSegment);
         }
-        if (ribbon && currentBrush && marker !== null) {
+        if (!replay && ribbon && currentBrush && marker !== null) {
           if (previousBrushPose && previousBrushPathSegment !== frame.pathSegment) {
             ribbon.breakStroke();
             previousBrushPose = undefined;
@@ -358,28 +375,54 @@ export const animateWebGL = <State>(
             previousBrushPathSegment = undefined;
             brushBasis = undefined;
           }
-        } else {
+        } else if (!replay) {
           ribbon?.breakStroke();
           previousBrushPose = undefined;
           previousBrushPathSegment = undefined;
           brushBasis = undefined;
         }
-        if (ribbon && ribbon.footprints.count > 0) {
-          writeProjectionMatrix(project, frame.viewport, markerProjection);
-          renderer.drawPaintFootprints(ribbon.footprints, frame.viewport, markerProjection);
-        }
-        if (markers) {
-          if (markers.size === 1 && previousMarker) {
-            const retained = previousMarker;
-            const projected = project(retained.pose);
-            renderer.draw(projected, camera ? projected.visibilityDepth : retained.visibilityDepth, frame.viewport, retained.options);
-          } else if (markers.size > 1) {
-            const projectVertex = (point: Pose) => camera ? project(point) : { ...frame.project(point), visibilityDepth: point.z ?? 0 };
-            writeProjectionMatrix(projectVertex, frame.viewport, markerProjection);
-            renderer.drawMarkers(frame.viewport, markerProjection, !camera);
+        // Lighting changes only redraw this scene: never evaluate application
+        // callbacks again or deposit/replace any of its retained samples.
+        const draw = () => {
+          if (lost || !renderer || canvas.width === 0 || canvas.height === 0) return;
+          resized = renderer.resize(canvas.width, canvas.height) || resized;
+          renderer.setLighting(lighting, viewScale, lightingDirectionInView(lighting, camera));
+          if (!resized) renderer.clear();
+          if (markers && markerRendererNeedsRestore) {
+            renderer.setMarkers(markers.values(), accumulationLimit);
+            markerRendererNeedsRestore = false;
           }
-        } else if (marker !== null && !paint) renderer.draw(position, position.visibilityDepth, frame.viewport, marker);
-        renderer.present();
+          if (trail && history) {
+            for (const samples of history.segments()) {
+              const positions = samples.map((retained) => {
+                const projected = project(retained.pose);
+                return camera ? projected : { ...projected, visibilityDepth: retained.visibilityDepth };
+              });
+              renderer.drawTrail(positions, frame.viewport, { width: trail.width, color: trail.color ?? marker?.color });
+            }
+          }
+          if (ribbon && ribbon.footprints.count > 0) {
+            writeProjectionMatrix(project, frame.viewport, markerProjection);
+            renderer.drawPaintFootprints(ribbon.footprints, frame.viewport, markerProjection);
+          }
+          if (markers) {
+            if (markers.size === 1 && previousMarker) {
+              const retained = previousMarker;
+              const projected = project(retained.pose);
+              renderer.draw(projected, camera ? projected.visibilityDepth : retained.visibilityDepth, frame.viewport, retained.options);
+            } else if (markers.size > 1) {
+              const projectVertex = (point: Pose) => camera ? project(point) : { ...frame.project(point), visibilityDepth: point.z ?? 0 };
+              writeProjectionMatrix(projectVertex, frame.viewport, markerProjection);
+              renderer.drawMarkers(frame.viewport, markerProjection, !camera);
+            }
+          } else if (marker !== null && !paint) renderer.draw(position, position.visibilityDepth, frame.viewport, marker);
+          renderer.present();
+          resized = false;
+        };
+        draw();
+        lastDrawInput = { pose: { ...pose }, planarDepth, marker };
+        drawingCleared = false;
+        redrawDrawing = draw;
       },
     });
   } catch (error) {
@@ -407,17 +450,18 @@ export const animateWebGL = <State>(
       try { runtime.setFraming(framing); }
       catch (error) { camera = previous; throw error; }
     },
-    setLighting(enabled) {
+    setLighting(value) {
       if (disposed) return;
-      if (typeof enabled !== 'boolean') throw new TypeError('WebGL lighting must be a boolean');
+      const next = resolveWebGLLighting(value);
       const previous = lighting;
-      lighting = enabled;
-      try { runtime.setFraming(framing); }
+      lighting = next;
+      try { redrawDrawing?.(); }
       catch (error) { lighting = previous; throw error; }
     },
     clear() {
       if (disposed) return;
       clearHistory();
+      drawingCleared = true;
       if (lost || !renderer || canvas.width === 0 || canvas.height === 0) return;
       renderer.resize(canvas.width, canvas.height);
       renderer.clear();

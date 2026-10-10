@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@rstest/core';
 import { animateWebGL } from '../../src/webgl';
-import type { WebGLFrame } from '../../src/webgl';
+import type { WebGLFrame, WebGLLightingOptions } from '../../src/webgl';
 import type { AnalyticMotionSource, OrthographicCamera } from '../../src/core';
 import type { RuntimePlatform } from '../../src/runtime';
 import { createHelixMotion, type HelixState } from '../../src/motions/helix';
@@ -40,7 +40,7 @@ const fakeGL = (derivatives = true) => {
     'bindBuffer', 'bufferData', 'bindTexture', 'texParameteri', 'bindFramebuffer', 'framebufferTexture2D',
     'framebufferRenderbuffer', 'enableVertexAttribArray', 'disableVertexAttribArray', 'vertexAttribPointer', 'disable', 'colorMask',
     'viewport', 'depthMask', 'clearColor', 'clearDepth', 'clear', 'texImage2D', 'bindRenderbuffer',
-    'renderbufferStorage', 'enable', 'depthFunc', 'useProgram', 'uniform3f', 'uniform2f', 'uniform1i',
+    'renderbufferStorage', 'enable', 'depthFunc', 'useProgram', 'uniform3f', 'uniform2f', 'uniform1i', 'uniform1f',
     'drawArrays', 'activeTexture', 'uniformMatrix3fv', 'vertexAttrib3f',
   ]) value[name] = (...args: unknown[]) => { operations.push([name, ...args]); };
   value.bindBuffer = (target: number, buffer: unknown) => { boundBuffer = buffer; operations.push(['bindBuffer', target, buffer]); };
@@ -797,30 +797,264 @@ describe('WebGL adapter', () => {
   });
 
   it('toggles lighting on retained drawing while paused without changing samples, colors, size, or GPU buffers', () => {
-    for (const mode of [{ accumulate: true }, { paint: true }, { trail: true }, {}]) {
+    for (const mode of [{ accumulate: true }, { paint: true }, { paint: { maxSamples: 3, limitBehavior: 'trim-oldest' as const } }, { trail: true }, {}]) {
       const gl = fakeGL();
       const platform = new Platform();
+      const canvas = new Canvas(gl.value);
       let time = 0;
-      const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+      let samples = 0;
+      let colors = 0;
+      let positions = 0;
+      const motion = source();
+      const controller = animateWebGL(canvas.asElement(), { ...motion, sample(time) { samples++; return motion.sample(time); } }, {
         platform, camera, ...mode,
-        marker(frame) { time = frame.elapsedSeconds; return { radius: 7, color: [0.2, 0.5, 0.8] }; },
+        position: ({ state }) => { positions++; return { x: state + positions / 10, y: 0, z: 0 }; },
+        marker(frame) { colors++; time = frame.elapsedSeconds; return { radius: 7, color: [colors % 2 ? 0.2 : 0.3, 0.5, 0.8] }; },
       });
       platform.fire(0); platform.fire(100); controller.pause();
       const elapsed = time;
+      const sampling = [samples, colors, positions];
+      const programs = gl.count('createProgram');
       const uploads = gl.count('bufferSubData');
       const allocations = gl.count('bufferData');
       const geometry = gl.uploadedBuffer();
-      controller.setLighting(true);
+      controller.setLighting({ ambient: { color: [0.1, 0.5, 1], intensity: 0.2 }, directional: { intensity: 0 }, depthCue: { strength: 0 } });
       expect(gl.operations).toContainEqual(['uniform1i', 'lightingEnabled', 1]);
+      expect(gl.count('createProgram')).toBe(programs);
       expect(time).toBe(elapsed);
+      expect([samples, colors, positions]).toEqual(sampling);
       expect(gl.count('bufferSubData')).toBe(uploads);
       expect(gl.count('bufferData')).toBe(allocations);
       expect(gl.uploadedBuffer()).toEqual(geometry);
       expect(controller.isPaused()).toBe(true);
       controller.setLighting(false);
       expect(gl.operations).toContainEqual(['uniform1i', 'lightingEnabled', 0]);
+      loss(canvas, gl);
+      controller.setLighting({ ambient: { intensity: 0.5 } });
+      restore(canvas, gl);
+      expect([samples, colors, positions]).toEqual(sampling);
+      expect(gl.uploadedBuffer()).toEqual(geometry);
+      expect(controller.isPaused()).toBe(true);
+      controller.clear();
+      const drawsAfterClear = gl.count('drawArrays');
+      controller.setLighting({});
+      expect(gl.count('drawArrays')).toBe(drawsAfterClear);
+      expect([samples, colors, positions]).toEqual(sampling);
       controller.dispose();
     }
+  });
+
+  it('keeps the last valid drawing usable for lighting after a paused framing update fails', () => {
+    for (const mode of [{ accumulate: true }, { paint: true }, { trail: true }, {}]) {
+      const gl = fakeGL();
+      let appearances = 0;
+      let positions = 0;
+      const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+        autoplay: false, platform: new Platform(), ...mode,
+        marker: () => { appearances++; return { color: [0.2, 0.5, 0.8] }; },
+        position: ({ state }) => { positions++; return { x: state, y: 0, z: 0 }; },
+      });
+      const geometry = gl.uploadedBuffer();
+      expect(() => controller.setFraming({ zoom: Number.MIN_VALUE })).toThrow(RangeError);
+      const sampling = [appearances, positions];
+      const uploads = gl.count('bufferSubData');
+      const allocations = gl.count('bufferData');
+      expect(() => controller.setLighting({ ambient: { intensity: 0.4 } })).not.toThrow();
+      expect(() => controller.setLighting(true)).not.toThrow();
+      expect([appearances, positions]).toEqual(sampling);
+      expect(gl.uploadedBuffer()).toEqual(geometry);
+      expect(gl.count('bufferSubData')).toBe(uploads);
+      expect(gl.count('bufferData')).toBe(allocations);
+      expect(controller.isPaused()).toBe(true);
+      controller.dispose();
+    }
+  });
+
+  it('redraws the initial paused marker when reset follows clear during context loss', () => {
+    for (const mode of [{ accumulate: true }, { paint: true }, { trail: true }, {}]) {
+      const gl = fakeGL();
+      const canvas = new Canvas(gl.value);
+      const platform = new Platform();
+      let time = -1;
+      const controller = animateWebGL(canvas.asElement(), source(), {
+        platform, ...mode, marker: (frame) => { time = frame.elapsedSeconds; return { color: [0, 1, 0] }; },
+      });
+      platform.fire(0); platform.fire(100); controller.pause();
+      controller.clear();
+      loss(canvas, gl);
+      controller.reset();
+      const drawings = gl.count('drawArrays');
+      restore(canvas, gl);
+      expect(time).toBe(0);
+      expect(gl.count('drawArrays')).toBeGreaterThan(drawings + 1); // Restored marker/paint and presentation.
+      expect(controller.isPaused()).toBe(true);
+      expect(platform.callbacks.size).toBe(0);
+      controller.dispose();
+    }
+  });
+
+  it('applies marker scale changes made during context loss to the restored current marker', () => {
+    for (const mode of [{ accumulate: true }, {}]) {
+      const gl = fakeGL();
+      const canvas = new Canvas(gl.value);
+      const controller = animateWebGL(canvas.asElement(), source(), {
+        autoplay: false, platform: new Platform(), ...mode,
+      });
+      expect(lastUniform(gl, 'radius')).toEqual([0.1, 0.2]);
+      loss(canvas, gl);
+      controller.setMarkerScale({ depthStrength: 0 });
+      restore(canvas, gl);
+      expect(lastUniform(gl, 'radius')).toEqual([0.05, 0.1]);
+      expect(controller.isPaused()).toBe(true);
+      controller.dispose();
+    }
+  });
+
+  const lastUniform = (gl: ReturnType<typeof fakeGL>, name: string) =>
+    gl.operations.filter(([operation, location]) => operation.startsWith('uniform') && location === name).at(-1)?.slice(2);
+
+  it('resolves disabled lighting, empty options, and legacy boolean defaults through the public API', () => {
+    for (const lighting of [undefined, false, true, {}]) {
+      const gl = fakeGL();
+      const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+        autoplay: false, platform: new Platform(), lighting,
+      });
+      expect(lastUniform(gl, 'lightingEnabled')).toEqual([lighting === undefined || lighting === false ? 0 : 1]);
+      if (lighting !== undefined && lighting !== false) {
+        expect(lastUniform(gl, 'lightingAmbientColor')).toEqual([1, 1, 1]);
+        expect(lastUniform(gl, 'lightingAmbientIntensity')).toEqual([0.3]);
+        expect(lastUniform(gl, 'lightingDirectionalColor')).toEqual([1, 1, 1]);
+        expect(lastUniform(gl, 'lightingDirectionalIntensity')).toEqual([0.7]);
+        expect(lastUniform(gl, 'lightingSpecularIntensity')).toEqual([0.12]);
+        expect(lastUniform(gl, 'lightingShininess')).toEqual([24]);
+        expect(lastUniform(gl, 'lightingDepthCueStrength')).toEqual([0.3]);
+        const direction = lastUniform(gl, 'lightingDirection') as number[];
+        const length = Math.hypot(-0.45, 0.65, 1);
+        [-0.45, 0.65, 1].forEach((component, index) => expect(direction[index]).toBeCloseTo(component / length));
+      }
+      controller.dispose();
+    }
+  });
+
+  it('snapshots nested lighting options and replaces omitted fields with defaults', () => {
+    const gl = fakeGL();
+    const canvas = new Canvas(gl.value);
+    const color: [number, number, number] = [0.2, 0.4, 0.6];
+    const direction: [number, number, number] = [1, 0, 0];
+    const lighting = { ambient: { color, intensity: 0.8 }, directional: { direction, intensity: 2 },
+      specular: { intensity: 0.5, shininess: 8 }, depthCue: { strength: 0 } } satisfies WebGLLightingOptions;
+    const controller = animateWebGL(canvas.asElement(), source(), {
+      autoplay: false, platform: new Platform(), lighting,
+    });
+    color[0] = 1; direction[0] = 0; direction[1] = 1; lighting.ambient.intensity = 3;
+    controller.setFraming({ fit: 'stretch' });
+    expect(lastUniform(gl, 'lightingAmbientColor')).toEqual([0.2, 0.4, 0.6]);
+    expect(lastUniform(gl, 'lightingAmbientIntensity')).toEqual([0.8]);
+    expect(lastUniform(gl, 'lightingDirection')).toEqual([1, 0, 0]);
+    controller.setLighting(lighting);
+    color[1] = 1; direction[1] = 0; direction[2] = 1;
+    loss(canvas, gl); restore(canvas, gl);
+    expect(lastUniform(gl, 'lightingAmbientColor')).toEqual([1, 0.4, 0.6]);
+    expect(lastUniform(gl, 'lightingDirection')).toEqual([0, 1, 0]);
+    controller.setLighting({ ambient: { intensity: 0 } });
+    expect(lastUniform(gl, 'lightingAmbientColor')).toEqual([1, 1, 1]);
+    expect(lastUniform(gl, 'lightingDirectionalIntensity')).toEqual([0.7]);
+    expect(lastUniform(gl, 'lightingSpecularIntensity')).toEqual([0.12]);
+    expect(lastUniform(gl, 'lightingShininess')).toEqual([24]);
+    expect(lastUniform(gl, 'lightingDepthCueStrength')).toEqual([0.3]);
+    controller.dispose();
+  });
+
+  it('rejects malformed and out-of-range lighting before allocation and keeps valid live state atomically', () => {
+    const cases: [unknown, typeof TypeError | typeof RangeError][] = [
+      ...[null, 1, 'yes', [], { ambient: null }, { directional: [] }, { specular: false },
+        { depthCue: 1 }, { directional: { space: 'local' } }, { ambient: { color: [1, 1] } },
+        { directional: { direction: [1, 0] } }, { directional: { direction: [true, 0, 0] } },
+        { ambient: { color: [1, '0', 0] } }, { directional: { space: null } }, { ambient: { intensity: '1' } },
+        { specular: { shininess: null } }, { depthCue: { strength: false } },
+      ].map((value): [unknown, typeof TypeError] => [value, TypeError]),
+      ...[{ ambient: { intensity: Number.MAX_VALUE } }, { directional: { intensity: Number.MAX_VALUE } },
+        { specular: { intensity: 4096 }, directional: { intensity: 4096 } },
+        { specular: { shininess: Number.MIN_VALUE } }, { specular: { shininess: Number.MAX_VALUE } },
+        { ambient: { intensity: -1 } }, { directional: { intensity: Infinity } },
+        { specular: { intensity: NaN } }, { specular: { shininess: 0 } },
+        { depthCue: { strength: 1.01 } }, { depthCue: { strength: -0.1 } },
+        { ambient: { color: [1, -0.1, 0] } }, { directional: { color: [0, 0, Infinity] } },
+        { directional: { direction: [0, 0, 0] } }, { directional: { direction: [NaN, 0, 1] } },
+      ].map((value): [unknown, typeof RangeError] => [value, RangeError]),
+    ];
+    const gl = fakeGL();
+    const canvas = new Canvas(gl.value);
+    for (const [value, error] of cases) {
+      expect(() => animateWebGL(canvas.asElement(), source(), {
+        platform: new Platform(), lighting: value as WebGLLightingOptions,
+      })).toThrow(error);
+      expect(gl.count('createProgram')).toBe(0);
+    }
+    const controller = animateWebGL(canvas.asElement(), source(), {
+      autoplay: false, platform: new Platform(), lighting: { ambient: { intensity: 0.9 } },
+    });
+    const operations = gl.operations.length;
+    for (const [value, error] of cases) expect(() => controller.setLighting(value as WebGLLightingOptions)).toThrow(error);
+    expect(gl.operations.length).toBe(operations);
+    controller.setFraming({ fit: 'stretch' });
+    expect(lastUniform(gl, 'lightingAmbientIntensity')).toEqual([0.9]);
+    expect(controller.isPaused()).toBe(true);
+    controller.dispose();
+  });
+
+  it('accepts portable GPU scalar boundaries including zero intensities and minimum shininess', () => {
+    for (const lighting of [
+      { ambient: { intensity: 4096 }, directional: { intensity: 0.7 }, specular: { intensity: 4096, shininess: 16384 }, depthCue: { strength: 1 } },
+      { ambient: { intensity: 0 }, directional: { intensity: 0 }, specular: { intensity: 0, shininess: 1 / 16384 }, depthCue: { strength: 0 } },
+    ]) {
+      const gl = fakeGL();
+      const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+        autoplay: false, platform: new Platform(), lighting,
+      });
+      expect(lastUniform(gl, 'lightingAmbientIntensity')).toEqual([lighting.ambient.intensity]);
+      expect(lastUniform(gl, 'lightingDirectionalIntensity')).toEqual([lighting.directional.intensity]);
+      expect(lastUniform(gl, 'lightingSpecularIntensity')).toEqual([lighting.specular.intensity]);
+      expect(lastUniform(gl, 'lightingShininess')).toEqual([lighting.specular.shininess]);
+      expect(lastUniform(gl, 'lightingDepthCueStrength')).toEqual([lighting.depthCue.strength]);
+      controller.dispose();
+    }
+  });
+
+  it('normalizes finite extreme directions without overflow or underflow', () => {
+    for (const magnitude of [Number.MAX_VALUE, Number.MIN_VALUE]) {
+      const gl = fakeGL();
+      const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), {
+        autoplay: false, platform: new Platform(), lighting: { directional: { direction: [magnitude, magnitude, magnitude] } },
+      });
+      for (const component of lastUniform(gl, 'lightingDirection') as number[]) expect(component).toBeCloseTo(1 / Math.sqrt(3));
+      controller.dispose();
+    }
+  });
+
+  it('rotates world directions with the camera but ignores camera translation, framing, and viewport scale', () => {
+    const gl = fakeGL();
+    const canvas = new Canvas(gl.value);
+    const platform = new Platform();
+    const controller = animateWebGL(canvas.asElement(), source(), { autoplay: false, platform, camera,
+      lighting: { directional: { direction: [0, 0, 1], space: 'world' } },
+    });
+    expect(lastUniform(gl, 'lightingDirection')).toEqual([0, 0, 1]);
+    controller.setCamera({ ...camera, position: { x: 0, y: 0, z: 20 } });
+    controller.setFraming({ fit: 'stretch', zoom: 2 });
+    canvas.width = 800; platform.resize?.();
+    expect(lastUniform(gl, 'lightingDirection')).toEqual([0, 0, 1]);
+    controller.setCamera({ ...camera, position: { x: 0, y: 0, z: -10 } });
+    expect(lastUniform(gl, 'lightingDirection')).toEqual([0, 0, -1]);
+    controller.setCamera({ ...camera, position: { x: 10, y: 0, z: 0 } });
+    [-1, 0, 0].forEach((component, index) => expect((lastUniform(gl, 'lightingDirection') as number[])[index]).toBeCloseTo(component));
+    controller.setLighting({ directional: { direction: [0, 0, 1], space: 'view' } });
+    expect(lastUniform(gl, 'lightingDirection')).toEqual([0, 0, 1]);
+    controller.setCamera(undefined);
+    controller.setLighting({ directional: { direction: [1, 2, 2], space: 'world' } });
+    const direction = lastUniform(gl, 'lightingDirection') as number[];
+    [1 / 3, -2 / 3, -2 / 3].forEach((component, index) => expect(direction[index]).toBeCloseTo(component));
+    controller.dispose();
   });
 
   it('keeps lighting choices through context recovery and supports depth-cue fallback without derivatives', () => {
@@ -849,10 +1083,10 @@ describe('WebGL adapter', () => {
     const gl = fakeGL();
     expect(() => animateWebGL(new Canvas(gl.value).asElement(), source(), {
       platform: new Platform(), lighting: 'yes' as unknown as boolean,
-    })).toThrow(/boolean/);
+    })).toThrow(TypeError);
     expect(gl.count('createProgram')).toBe(0);
     const controller = animateWebGL(new Canvas(gl.value).asElement(), source(), { platform: new Platform(), autoplay: false });
-    expect(() => controller.setLighting('yes' as unknown as boolean)).toThrow(/boolean/);
+    expect(() => controller.setLighting('yes' as unknown as boolean)).toThrow(TypeError);
     expect(controller.isPaused()).toBe(true);
     controller.dispose();
   });

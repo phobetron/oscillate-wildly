@@ -1767,6 +1767,111 @@ try {
 
       const lightingCamera = { position: { x: 0, y: 0, z: 5 }, bounds, near: 1, far: 9 };
       const brightness = (pixel) => pixel[0] + pixel[1] + pixel[2];
+      const whiteMarker = { color: [1, 1, 1] };
+      const configured = fixture([{ marker: whiteMarker }], { camera: lightingCamera, lighting: true });
+      const legacyPixel = configured.rgba(50, 50);
+      configured.controller.setLighting({});
+      check(configured.rgba(50, 50).every((value, channel) => value === legacyPixel[channel]), 'Empty lighting options retain exact boolean-default pixels');
+      configured.controller.setLighting({ ambient: { color: [1, 0.5, 0.25], intensity: 0.25 },
+        directional: { intensity: 0 }, specular: { intensity: 0 }, depthCue: { strength: 0 } });
+      configured.pixel(50, 50, [64, 32, 16, 255], 'Ambient RGB and intensity control actual GPU output');
+      configured.controller.setLighting({ ambient: { intensity: 0 },
+        directional: { direction: [0, 0, 1], color: [1, 0, 0], intensity: 0.4 },
+        specular: { intensity: 0 }, depthCue: { strength: 0 } });
+      configured.pixel(50, 50, [102, 0, 0, 255], 'Directional color and intensity tint diffuse GPU shading');
+      configured.controller.setLighting({ ambient: { intensity: 0 },
+        directional: { direction: [0, 0, -1], intensity: 1 }, depthCue: { strength: 0 } });
+      configured.pixel(50, 50, [0, 0, 0, 255], 'Opposite light/view halfway vector remains finite and produces no highlight');
+      configured.dispose();
+
+      const highlight = fixture([{ marker: { color: [0, 0, 0] } }], { camera: lightingCamera });
+      const highlightOptions = { ambient: { intensity: 0 }, directional: { direction: [0, 0, 1], color: [0, 1, 0], intensity: 0.7 },
+        specular: { intensity: 0.2, shininess: 16 }, depthCue: { strength: 0 } };
+      highlight.controller.setLighting(highlightOptions);
+      const fullHighlight = highlight.rgba(50, 50);
+      check(fullHighlight[0] === 0 && fullHighlight[2] === 0 && fullHighlight[1] > 40, 'Specular highlight follows directional RGB on a black surface');
+      highlight.controller.setLighting({ ...highlightOptions, directional: { ...highlightOptions.directional, intensity: 0.35 } });
+      const halfHighlight = highlight.rgba(50, 50);
+      check(Math.abs(fullHighlight[1] - 2 * halfHighlight[1]) <= 2, 'Specular highlight scales with directional intensity');
+      highlight.controller.setLighting({ ...highlightOptions, directional: { ...highlightOptions.directional, intensity: 0 } });
+      highlight.pixel(50, 50, [0, 0, 0, 255], 'Zero directional intensity removes specular light');
+      const angledHighlight = { ...highlightOptions, directional: { ...highlightOptions.directional, direction: [0.8, 0, 0.6] },
+        specular: { intensity: 0.5, shininess: 1 } };
+      highlight.controller.setLighting(angledHighlight);
+      const broadHighlight = highlight.rgba(50, 50);
+      highlight.controller.setLighting({ ...angledHighlight, specular: { intensity: 0.5, shininess: 64 } });
+      check(broadHighlight[1] > highlight.rgba(50, 50)[1] + 50, 'Shininess concentrates specular highlights at fixed light direction');
+      highlight.dispose();
+
+      const depthSettings = { ambient: { intensity: 0.5 }, directional: { intensity: 0 }, depthCue: { strength: 0 } };
+      const customDepth = fixture([{ pose: { x: -0.5, z: 2 }, marker: whiteMarker }, { pose: { x: 0.5, z: -2 }, marker: whiteMarker }],
+        { camera: lightingCamera, lighting: depthSettings });
+      customDepth.advance(1);
+      customDepth.pixel(25, 50, [128, 128, 128, 255], 'Zero depth cue preserves near ambient lighting');
+      customDepth.pixel(75, 50, [128, 128, 128, 255], 'Zero depth cue preserves far ambient lighting');
+      customDepth.controller.setLighting({ ...depthSettings, depthCue: { strength: 0.8 } });
+      check(brightness(customDepth.rgba(25, 50)) > brightness(customDepth.rgba(75, 50)) + 100, 'Custom depth strength darkens distant retained geometry');
+      customDepth.dispose();
+
+      const anchored = fixture([{ marker: whiteMarker }], { camera: lightingCamera });
+      const anchoredOptions = { ambient: { intensity: 0 }, directional: { direction: [0, 0, 1], intensity: 0.5, space: 'world' },
+        specular: { intensity: 0 }, depthCue: { strength: 0 } };
+      anchored.controller.setLighting(anchoredOptions);
+      anchored.pixel(50, 50, [128, 128, 128, 255], 'World light illuminates a camera-facing marker');
+      anchored.controller.setCamera({ ...lightingCamera, position: { x: 0, y: 0, z: -5 } });
+      anchored.pixel(50, 50, [0, 0, 0, 255], 'Orbiting rotates world lighting into view coordinates');
+      anchored.controller.setLighting({ ...anchoredOptions, directional: { ...anchoredOptions.directional, space: 'view' } });
+      anchored.pixel(50, 50, [128, 128, 128, 255], 'View light remains attached to the orbiting camera');
+      anchored.dispose();
+
+      for (const mode of [{ accumulate: true }, { accumulate: false }, { accumulate: false, trail: { width: 8 } },
+        { accumulate: false, paint: true }, { accumulate: false, paint: { maxSamples: 3, limitBehavior: 'trim-oldest' } }]) {
+        const retainedLight = fixture([{ pose: { x: -0.5 }, marker: whiteMarker }, { pose: { x: 0.5 }, marker: whiteMarker }], { camera: lightingCamera, ...mode });
+        retainedLight.advance(1);
+        const elapsed = retainedLight.sampledTime;
+        const settings = { ambient: { color: [0.2, 0.6, 1], intensity: 0.5 }, directional: { intensity: 0 }, depthCue: { strength: 0 } };
+        retainedLight.controller.setLighting(settings);
+        const beforeLoss = retainedLight.rgba(75, 50);
+        retainedLight.pixel(75, 50, [26, 77, 128, 255], 'Structured lighting shades paused retained modes');
+        let rejectedFraming = false;
+        try { retainedLight.controller.setFraming({ zoom: Number.MIN_VALUE }); } catch (error) { rejectedFraming = error instanceof RangeError; }
+        check(rejectedFraming, 'Subnormal framing zoom must be rejected');
+        retainedLight.controller.setLighting(settings);
+        retainedLight.pixel(75, 50, [26, 77, 128, 255], 'Lighting preserves the last valid GPU scene after rejected framing');
+        const restoreRetainedLight = await lose(retainedLight);
+        retainedLight.controller.setLighting({ ...settings, ambient: { color: [1, 0.4, 0.2], intensity: 0.5 } });
+        await restoreRetainedLight();
+        retainedLight.pixel(75, 50, [128, 51, 26, 255], 'Lighting changes during context loss survive GPU recovery');
+        retainedLight.controller.setLighting(settings);
+        check(retainedLight.rgba(75, 50).every((value, channel) => value === beforeLoss[channel]), 'Recovery restores custom lighting on retained geometry');
+        check(retainedLight.sampledTime === elapsed && retainedLight.controller.isPaused() && retainedLight.scheduled === 0, 'Structured lighting and recovery preserve paused motion');
+        retainedLight.controller.clear();
+        retainedLight.controller.setLighting(settings);
+        retainedLight.pixel(75, 50, blank, 'Lighting cannot repopulate cleared retained geometry');
+        const restoreClearedLight = await lose(retainedLight);
+        retainedLight.controller.setLighting({});
+        await restoreClearedLight();
+        retainedLight.pixel(75, 50, blank, 'Context recovery cannot repopulate cleared geometry');
+        const restoreResetLight = await lose(retainedLight);
+        retainedLight.controller.reset();
+        retainedLight.controller.setLighting(false);
+        await restoreResetLight();
+        retainedLight.pixel(25, 50, [255, 255, 255, 255], 'Reset during loss redraws the initial marker after clear');
+        check(retainedLight.controller.isPaused() && retainedLight.scheduled === 0, 'Reset during loss retains manual pause');
+        retainedLight.dispose();
+      }
+
+      for (const accumulate of [false, true]) {
+        const scaledRecovery = fixture([{ pose: { depth: 2 }, marker: whiteMarker }], { accumulate });
+        scaledRecovery.pixel(65, 50, [255, 255, 255, 255], 'Initial marker uses its depth scale');
+        const restoreScale = await lose(scaledRecovery);
+        scaledRecovery.controller.setMarkerScale({ depthStrength: 0 });
+        await restoreScale();
+        scaledRecovery.pixel(65, 50, blank, 'Marker scale setter during loss updates restored footprint');
+        scaledRecovery.pixel(55, 50, [255, 255, 255, 255], 'Updated marker footprint still draws its initial center');
+        scaledRecovery.dispose();
+      }
+
       for (const withoutDerivatives of [false, true]) {
         for (const limitBehavior of ['pause', 'trim-oldest']) {
           const smooth = fixture([
