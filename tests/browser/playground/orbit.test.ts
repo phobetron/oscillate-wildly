@@ -1,0 +1,113 @@
+import assert from 'node:assert/strict';
+import { test, expect } from '../fixtures';
+import { webglControls } from './webgl.helpers';
+
+test.beforeEach(async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#pause').click();
+  await expect(page.locator('#pause')).toHaveText('Resume');
+});
+
+test('mouse, touch and keyboard orbit reproject pixels and release pointer capture', async ({ page }) => {
+  const { change: webglChange, readout: webglReadout, animate: animateWebGLFor } = await webglControls(page);
+  // Real pointer input exercises capture and browser touch behavior. Raster
+  // reads happen in a listener after the app's pointermove, before compositing.
+  await webglChange('#motion', 'lissajous');
+  await webglChange('#webgl-view', 'spatial');
+  await webglChange('#webgl-camera', 'front');
+  await webglChange('#show-trail', true);
+  await webglChange('#trail-length', 32);
+  await webglChange('#parameter-controls [data-parameter="periodSeconds"]', 4);
+  await webglChange('#marker-size', 24);
+  const orbitInitial = await animateWebGLFor(0.3);
+  const orbitTime = await webglReadout();
+  const orbitStage = page.locator('#webgl-stage');
+  await orbitStage.scrollIntoViewIfNeeded();
+  assert.equal(await orbitStage.evaluate((element) => getComputedStyle(element).touchAction), 'none');
+  await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>('#webgl-stage')!;
+    window.orbitRasters = [];
+    const record = () => window.orbitRasters.push(window.demoWebGLPixels());
+    canvas.addEventListener('pointermove', record);
+    window.stopOrbitRecording = () => canvas.removeEventListener('pointermove', record);
+  });
+  const box = (await orbitStage.boundingBox())!;
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  assert.equal(await orbitStage.getAttribute('data-dragging'), '');
+  await page.mouse.move(start.x + 100, start.y + 60, { steps: 5 });
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'custom');
+  const mouseOrbit = await page.evaluate(() => window.orbitRasters.at(-1)!);
+  assert.ok(mouseOrbit.count > 0, 'Mouse orbit retains and reprojects the tail');
+  assert.notEqual(mouseOrbit.hash, orbitInitial.hash, 'Mouse drag changes the actual 3D view');
+  assert.equal((await webglReadout()).time, orbitTime.time, 'Orbit preserves motion time');
+  assert.equal((await webglReadout()).pause, 'Resume', 'Orbit preserves manual pause');
+  await page.mouse.move(box.x + box.width + 20, start.y, { steps: 2 });
+  const outsideOrbit = await page.evaluate(() => window.orbitRasters.at(-1)!);
+  assert.notEqual(outsideOrbit.hash, mouseOrbit.hash, 'Pointer capture continues orbiting outside the canvas');
+  await page.mouse.up();
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null);
+  const releasedView = await webglReadout();
+  await page.mouse.move(start.x, start.y);
+  assert.deepEqual(await webglReadout(), releasedView, 'Mouse hover after release does not rotate');
+  await webglChange('#webgl-camera', 'front');
+  const restoredFront = await webglChange('#marker-size', 24);
+  assert.equal(restoredFront.hash, orbitInitial.hash, 'Selecting the preset restores the original view and retained tail');
+  assert.equal((await webglReadout()).time, orbitTime.time);
+
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up();
+  await page.mouse.move(start.x + 30, start.y + 20);
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Releasing the primary button ends orbit even while another button is held');
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'front', 'Secondary mouse buttons cannot continue orbiting');
+  await page.mouse.up({ button: 'right' });
+
+  const touch = await page.context().newCDPSession(page);
+  await touch.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+  const touchPoint = (x: number, y: number) => ({ x, y, id: 1, radiusX: 1, radiusY: 1, force: 1 });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touchPoint(start.x, start.y)] });
+  assert.equal(await orbitStage.getAttribute('data-dragging'), '');
+  const scrollBeforeTouch = await page.evaluate(() => window.scrollY);
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [touchPoint(start.x - 80, start.y + 50)] });
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'custom');
+  const touchOrbit = await page.evaluate(() => window.orbitRasters.at(-1)!);
+  assert.notEqual(touchOrbit.hash, orbitInitial.hash, 'Touch drag changes the actual 3D view');
+  assert.equal(await page.evaluate(() => window.scrollY), scrollBeforeTouch, 'Touch orbit does not scroll the page');
+  assert.equal((await webglReadout()).time, orbitTime.time);
+  assert.equal((await webglReadout()).pause, 'Resume');
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Touch cancellation releases drag state');
+  const cancelledView = await webglReadout();
+  await page.mouse.move(start.x + 30, start.y + 10);
+  assert.deepEqual(await webglReadout(), cancelledView, 'Hover after touch cancellation does not rotate');
+  await webglChange('#webgl-camera', 'front');
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touchPoint(start.x, start.y)] });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [touchPoint(start.x + 50, start.y - 20)] });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Touch release permits a new drag');
+  await touch.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await touch.detach();
+
+  await webglChange('#webgl-camera', 'front');
+  await orbitStage.focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#webgl-camera').inputValue(), 'custom', 'Keyboard arrows rotate the camera');
+  assert.equal((await webglReadout()).time, orbitTime.time);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  assert.equal(await orbitStage.getAttribute('data-dragging'), '');
+  await webglChange('#webgl-view', 'planar');
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Switching views mid-drag releases pointer capture');
+  await page.mouse.up();
+  assert.notEqual(await orbitStage.evaluate((element) => getComputedStyle(element).touchAction), 'none', 'Planar view retains normal touch scrolling');
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 60, start.y + 30);
+  await page.mouse.up();
+  assert.equal(await orbitStage.getAttribute('data-dragging'), null, 'Planar view does not capture drags');
+  await page.evaluate(() => window.stopOrbitRecording());
+  await webglChange('#show-trail', false);
+});

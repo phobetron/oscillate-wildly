@@ -384,8 +384,14 @@ pnpm build      # builds the library
 pnpm typecheck
 pnpm test
 pnpm exec playwright install chromium # one-time browser setup if needed
-pnpm test:browser              # builds the library and demo, then runs Chrome smoke checks
+pnpm test:browser              # builds the library and demo, then runs named Chromium tests
+pnpm test:list                 # lists unit and browser cases without running them
 ```
+
+See [the test guide](./tests/README.md) for suite responsibilities, focused test
+commands, browser failure artifacts, and the criteria for retaining coverage.
+Use `pnpm preview:capture /tmp/oscillate-preview` to generate example screenshots
+separately from the tests.
 
 The example source is in [`examples/`](./examples). It is the integration reference for mounting and replacing controllers. Renderer tabs appear in the order **WebGL**, **Canvas 2D**, **DOM**, and **SVG**, with WebGL selected by default. Use the arrow keys, Home, or End to focus a tab, then Enter or Space to activate it. Each tab shows only its relevant controls, with library configuration grouped beside its output on desktop and above it on narrow screens. Playground actions stay below the output. DOM and SVG marker styling and overflow are host controls below the output; Canvas and WebGL marker appearance is library configuration in the settings column. The playground defaults to **Contain**. WebGL groups **True 3D** motions (Helix, Lissajous, Lorenz) first, followed by **Other motions** (Duffing, Ellipse, Rose, Van der Pol), with alphabetical order inside each group. Other tabs use one alphabetical motion list. Each tab defaults to its first motion option; the current lists make that Helix on WebGL and Duffing elsewhere. An explicitly chosen motion is retained when switching tabs. **Restore playground defaults** clears that choice and returns to the first WebGL motion.
 On WebGL, selecting **Lissajous**, **Helix**, **Lorenz**, or **Duffing**, or entering the tab with one of those motions selected, defaults to **3D coordinates** with a front or oblique orthographic camera. Duffing remains in **Other motions** because its 3D view displays phase space rather than physical XYZ coordinates. Unsupported motions use **Planar** coordinates. Choosing **Planar** explicitly is preserved through parameter and framing edits. Drag the canvas with the primary mouse button or one finger to orbit around the motion, or focus the canvas and use the arrow keys. Dragging continues outside the canvas until release or cancellation. The camera stays at the same distance and stops short of the poles. **Camera preset** shows **Dragged view** after rotation; choosing **Front** or **Oblique** restores that preset without restarting motion. Planar views retain normal touch scrolling. Orbiting preserves motion time and manual pause, reprojects the entire retained drawing with current-camera depth testing. The projection remains orthographic.

@@ -8,3 +8,5 @@ build/
 .rsbuild/
 .rslib/
 coverage/
+test-results/
+playwright-report/

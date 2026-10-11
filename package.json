@@ -96,14 +96,18 @@
     "prepack": "pnpm build",
     "dev": "rsbuild dev",
     "test": "rstest",
-    "test:browser": "pnpm build && rsbuild build && node tests/browser/smoke.mjs",
+    "test:browser": "pnpm build && rsbuild build && playwright test",
+    "test:list": "rstest list && playwright test --list",
+    "preview:capture": "pnpm build && rsbuild build && tsx scripts/preview.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@rsbuild/core": "2.2.9",
     "@rslib/core": "^1.0.2",
     "@rstest/core": "^0.12.2",
+    "@types/node": "^20.19.43",
     "playwright": "^1.55.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.2"
   }
 }

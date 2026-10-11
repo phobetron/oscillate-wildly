@@ -1,0 +1,84 @@
+import assert from 'node:assert/strict';
+import { test, expect } from '../fixtures';
+import { webglControls } from './webgl.helpers';
+import type { PixelSummary } from './webgl.helpers';
+
+test.beforeEach(async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#pause').click();
+  await expect(page.locator('#pause')).toHaveText('Resume');
+});
+
+test('paint retains deposited geometry through appearance and camera changes', async ({ page }) => {
+  const { change: webglChange, click: webglClick, readout: webglReadout, animate: animateWebGLFor } = await webglControls(page);
+  await webglChange('#motion', 'lissajous');
+  await webglChange('#parameter-controls [data-parameter="periodSeconds"]', 4);
+  await webglChange('#webgl-camera', 'front');
+  await webglChange('#webgl-shape', 'circle');
+  await webglChange('#webgl-lighting', false);
+  await webglChange('#webgl-paint', true);
+  assert.equal(await page.locator('#webgl-accumulate').isChecked(), false);
+  assert.equal(await page.locator('#show-trail').isChecked(), false);
+  assert.equal(await page.locator('#accumulation-length').isDisabled(), false);
+  const ribbonRaster = await animateWebGLFor(0.3);
+  const ribbonTime = await webglReadout();
+  const litRibbon = await webglChange('#webgl-lighting', true);
+  assert.equal(litRibbon.count, ribbonRaster.count, 'Lighting preserves ribbon coverage and the size cue');
+  assert.notEqual(litRibbon.hash, ribbonRaster.hash, 'Lighting shades the entire retained ribbon while paused');
+  assert.deepEqual(await webglReadout(), ribbonTime, 'Lighting preserves motion time, size, depth, and pause');
+  const flatRibbonAgain = await webglChange('#webgl-lighting', false);
+  assert.equal(flatRibbonAgain.hash, ribbonRaster.hash, 'Switching back to flat restores the original painted base colors');
+  const squareBrush = await webglChange('#webgl-shape', 'square');
+  assert.equal(squareBrush.hash, ribbonRaster.hash, 'Paused shape changes leave deposited brush footprints unchanged');
+  assert.equal((await webglReadout()).time, ribbonTime.time, 'Shape changes preserve the painting and motion time');
+  const circleBrush = await webglChange('#webgl-shape', 'circle');
+  assert.equal(circleBrush.hash, ribbonRaster.hash, 'Switching marker shape back leaves the same deposited paint');
+  const obliqueRibbon = await webglChange('#webgl-camera', 'oblique');
+  assert.ok(obliqueRibbon.count > 0, 'World-space ribbon redraws through an oblique camera');
+  assert.notEqual(obliqueRibbon.hash, ribbonRaster.hash, 'Ribbon geometry rotates with the camera');
+  assert.equal((await webglChange('#webgl-camera', 'front')).hash, ribbonRaster.hash, 'Returning to the original view restores the same ribbon');
+  assert.equal((await webglReadout()).time, ribbonTime.time);
+  await webglChange('#accumulation-length', 3);
+  const cappedBrush = await page.evaluate(() => new Promise<PixelSummary>((resolvePaint, reject) => {
+    const pause = document.querySelector<HTMLElement>('#pause')!;
+    const observer = new MutationObserver(() => {
+      if (pause.textContent !== 'Resume') return;
+      observer.disconnect(); clearTimeout(timeout);
+      resolvePaint(window.demoWebGLPixels());
+    });
+    const timeout = setTimeout(() => { observer.disconnect(); reject(new Error('Brush did not pause at its paint limit')); }, 5000);
+    observer.observe(pause, { childList: true, subtree: true, characterData: true });
+    pause.click();
+  }));
+  assert.ok(cappedBrush.count > 0, 'The example retains painted geometry when the budget fills');
+  assert.match((await page.locator('#status').textContent())!, /Paint limit reached/);
+  const stoppedBrush = await webglReadout();
+  await page.locator('#pause').click();
+  assert.deepEqual(await webglReadout(), stoppedBrush, 'Full brush cannot resume and overwrite its beginning');
+  await webglChange('#accumulation-length', 0);
+  await webglChange('#paint-limit-behavior', 'trim-oldest');
+  assert.equal(await page.locator('#paint-limit-behavior').inputValue(), 'pause', 'Failed remount restores the applied limit policy');
+  assert.deepEqual(await webglReadout(), stoppedBrush, 'Invalid remount preserves the paused paint controller');
+  await page.locator('#pause').click();
+  assert.deepEqual(await webglReadout(), stoppedBrush, 'Failed trim switch keeps the full-paint resume guard');
+  await webglChange('#accumulation-length', 3);
+  assert.equal((await webglClick('#clear-drawing')).count, 0, 'Clear removes the completed brush painting');
+  assert.doesNotMatch((await page.locator('#status').textContent())!, /Paint limit reached/);
+  assert.equal(await page.locator('#paint-limit-behavior').isVisible(), true);
+  assert.equal(await page.locator('#paint-limit-behavior').inputValue(), 'pause');
+  await webglChange('#paint-limit-behavior', 'trim-oldest');
+  const rollingBrush = await animateWebGLFor(0.25);
+  assert.ok(rollingBrush.count > 0, 'Trim mode retains the most recent painted surface');
+  assert.ok((await webglReadout()).time > 0.1, 'Trim mode keeps advancing beyond its three-sample budget');
+  assert.doesNotMatch((await page.locator('#status').textContent())!, /Paint limit reached/);
+  const rollingTime = await webglReadout();
+  await webglChange('#webgl-camera', 'oblique');
+  assert.equal((await webglReadout()).time, rollingTime.time, 'Camera redraw does not age rolling paint');
+  assert.equal((await webglChange('#webgl-camera', 'front')).hash, rollingBrush.hash, 'Camera round trip preserves rolling geometry');
+  await animateWebGLFor(0.1);
+  assert.ok((await webglReadout()).time > rollingTime.time, 'A full rolling brush can resume after a manual pause');
+  await webglChange('#accumulation-length', 12000);
+  await webglChange('#webgl-paint', false);
+  assert.equal(await page.locator('#paint-limit-behavior').isVisible(), false);
+
+});
